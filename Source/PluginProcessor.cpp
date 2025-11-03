@@ -164,39 +164,44 @@ void AudioPluginAudioProcessor::pushNextSampleIntoFifo(float sample) noexcept
     fifo[fifoIndex++] = sample;
 }
 
-void AudioPluginAudioProcessor::drawNextFrameOfSpectrum()
-{
-    // 1. Apply windowing function to reduce spectral leakage
-    window.multiplyWithWindowingTable(fftData, fftSize);
 
-    // 2. Perform the FFT (transforms time domain to frequency domain)
+
+void AudioPluginAudioProcessor::updateSpectrumArray(double sampleRate)
+{
+    // Window anwenden
+    window.multiplyWithWindowingTable(fftData, fftSize);
     forwardFFT.performFrequencyOnlyForwardTransform(fftData);
 
-    // 3. Define dB range for visualization
-    auto mindB = -100.0f; // Minimum dB (silence)
-    auto maxdB = 0.0f;    // Maximum dB (full scale)
+    auto mindB = -100.0f;
+    auto maxdB = 0.0f;
 
-    // 4. Process FFT results for display
+    // Leeres Array füllen
+    spectrumArray.clear();
+    spectrumArray.reserve(scopeSize);
+
     for (int i = 0; i < scopeSize; ++i)
     {
-        // Create logarithmic frequency scale (more natural for audio)
-        auto skewedProportionX = 1.0f - std::exp(std::log(1.0f - (float)i / (float)scopeSize) * 0.2f);
+        // Direkt linear von FFT-Index
+        int fftDataIndex = juce::jlimit(0, fftSize / 2, i * (fftSize / 2) / scopeSize);
 
-        // Map display point to FFT bin with logarithmic scaling
-        auto fftDataIndex = juce::jlimit(0, fftSize / 2,
-            (int)(skewedProportionX * (float)fftSize * 0.5f));
-
-        // Convert FFT magnitude to dB and normalize to 0-1 range
         auto level = juce::jmap(
-            juce::jlimit(mindB, maxdB,
-                juce::Decibels::gainToDecibels(fftData[fftDataIndex])
-                - juce::Decibels::gainToDecibels((float)fftSize)),
-            mindB, maxdB, 0.0f, 1.0f);
+            juce::jlimit(
+                mindB,
+                maxdB,
+                juce::Decibels::gainToDecibels(fftData[fftDataIndex]) - juce::Decibels::gainToDecibels((float)fftSize)
+            ),
+            mindB,
+            maxdB,
+            0.0f,
+            1.0f
+        );
 
-        // Store processed value for display
-        scopeData[i] = level;
+        // Frequenz zuordnen
+        float frequency = (float)fftDataIndex * (sampleRate / (float)fftSize);
+        spectrumArray.push_back({ frequency, level });
     }
 }
+
 
 
 //==============================================================================

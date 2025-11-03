@@ -141,6 +141,7 @@ void AudioPluginAudioProcessorEditor::loadReferenceCurve(const juce::String& fil
 
 AudioPluginAudioProcessorEditor::~AudioPluginAudioProcessorEditor()
 {
+
 }
 
 //==============================================================================
@@ -183,7 +184,7 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
     for (auto f : frequencies)
     {
         // Frequenzen in 0-1 Bereich umrechnen
-        float normX = juce::mapFromLog10(f, 17.0f, 23700.0f);
+        float normX = juce::mapFromLog10(f, 20.0f, 20000.0f);
 
         // Normierten Bereich (0-1) auf grünen Bereich skalieren
         float x = spectrumDisplayArea.getX() + normX * spectrumDisplayArea.getWidth();
@@ -211,6 +212,39 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
             15, // Textbox-Höhe
             juce::Justification::centred, // zentrieren
             1 // max. Anzahl an Zeilen
+        );
+    }
+
+    const float minDb = -100.0f;
+    const float maxDb = 0.0f;
+
+    float textX = (float)spectrumDisplayArea.getX() - 40.0f;
+
+    g.setColour(juce::Colours::lightgrey.withAlpha(0.5f));
+
+    for (auto level : levels)
+    {
+        float normY = juce::jmap(level, minDb, maxDb, 0.0f, 1.0f);
+
+        // Invertiertes Mapping: 0.0f dB (Maximum) ist oben (kleiner Y-Wert)
+        float y = spectrumDisplayArea.getY() + (1.0f - normY) * spectrumDisplayArea.getHeight();
+
+        g.drawHorizontalLine(
+            static_cast<int>(y),
+            (float)spectrumDisplayArea.getX(),
+            (float)spectrumDisplayArea.getRight()
+        );
+
+        juce::String text = juce::String((int)level) + " dB";
+
+        g.drawFittedText(
+            text,
+            (int)textX,
+            (int)(y - 7),
+            30,
+            14,
+            juce::Justification::centredRight,
+            1
         );
     }
 
@@ -402,56 +436,44 @@ void AudioPluginAudioProcessorEditor::timerCallback()
     if (processorRef.getNextFFTBlockReady())
     {
         // Process the FFT data for display
-        processorRef.drawNextFrameOfSpectrum();
+        processorRef.updateSpectrumArray(processorRef.getSampleRate());
         processorRef.setNextFFTBlockReady(false); // Reset flag
         repaint(); // Trigger redraw
     }
 }
 
-// Draws the spectrum line - KORRIGIERTE VERSION
 void AudioPluginAudioProcessorEditor::drawFrame(juce::Graphics& g)
 {
-    auto scopeData = processorRef.getScopeData();
-    auto scopeSize = processorRef.getScopeSize();
-
-    if (scopeData == nullptr || scopeSize == 0)
+    auto& spectrum = processorRef.spectrumArray;
+    if (spectrum.empty())
         return;
 
-    // Bereich für das Spektrum definieren
-    auto area = spectrumDisplayArea;
+    auto area = spectrumDisplayArea.toFloat();
+    const float minFreq = 20.0f;
+    const float maxFreq = processorRef.getSampleRate() / 2.0f;
+    const float logMin = std::log10(minFreq);
+    const float logMax = std::log10(maxFreq);
 
-    // Pfad für das Spektrum erstellen
-    juce::Path spectrumPath;
-
+    juce::Path path;
     bool firstPoint = true;
-
-    // Pfad durch alle Punkte zeichnen mit KORREKTER Skalierung
-    for (int i = 0; i < scopeSize; ++i)
+    for (auto& point : spectrum)
     {
+        if (point.frequency < minFreq)
+            continue;
 
-        // Dies ist die GLEICHE Berechnung wie in drawNextFrameOfSpectrum:
-        float skewedProportionX = 1.0f - std::exp(std::log(1.0f - (float)i / (float)scopeSize) * 0.2f);
-
-        // X-Position auf den spectrumDisplayArea skalieren
-        float x = area.getX() + skewedProportionX * area.getWidth();
-
-        // Y-Position aus FFT-Daten (invertiert: oben = hohe Amplitude)
-        float y = juce::jmap(scopeData[i], 0.0f, 1.0f,
-            (float)area.getBottom(), (float)area.getY());
+        float logFreq = std::log10(point.frequency);
+        float x = area.getX() + juce::jmap(logFreq, logMin, logMax, 0.0f, 1.0f) * area.getWidth();
+        float y = juce::jmap(point.level, 0.0f, 1.0f, area.getBottom(), area.getY());
 
         if (firstPoint)
         {
-            spectrumPath.startNewSubPath(x, y);
+            path.startNewSubPath(x, y);
             firstPoint = false;
         }
         else
-        {
-            spectrumPath.lineTo(x, y);
-        }
+            path.lineTo(x, y);
     }
 
-    // Spektrum-Linie zeichnen
     g.setColour(juce::Colours::cyan);
-    g.strokePath(spectrumPath, juce::PathStrokeType(2.0f));
-
+    g.strokePath(path, juce::PathStrokeType(2.0f));
 }

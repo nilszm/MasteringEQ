@@ -46,11 +46,19 @@ public:
 
     // Spectrum Analyzer Specific Public Methods
     void pushNextSampleIntoFifo(float sample) noexcept;
-    void drawNextFrameOfSpectrum();
+    void updateSpectrumArray(double sampleRate);
     bool getNextFFTBlockReady() const { return nextFFTBlockReady; }
     const float* getScopeData() const { return scopeData; }
     int getScopeSize() const { return scopeSize; }
     void setNextFFTBlockReady(bool ready) { nextFFTBlockReady = ready; }
+
+    struct SpectrumPoint
+    {
+        float frequency; // Hz
+        float level;     // dB oder normalisiert 0..1
+    };
+
+    std::vector<SpectrumPoint> spectrumArray; // Membervariable
 
 private:
     //==============================================================================
