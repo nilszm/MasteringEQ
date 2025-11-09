@@ -30,7 +30,7 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
             switch (id)
             {
             case 1: // Pop
-                loadReferenceCurve("Pop.json");
+                loadReferenceCurve("pop_medref.json");
                 break;
 
             case 2: // HipHop
@@ -255,7 +255,7 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
         const float minFreq = 20.0f;
         const float maxFreq = 20000.0f;
         const float minDb = -25.0f;
-        const float maxDb = 5.0f;
+        const float maxDb = 70.0f;
 
         // Pfade für die Linienpunkte
         juce::Path pathP10;
