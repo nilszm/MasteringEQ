@@ -449,8 +449,8 @@ void AudioPluginAudioProcessorEditor::drawFrame(juce::Graphics& g)
         return;
 
     auto area = spectrumDisplayArea.toFloat();
-    const float minFreq = 20.0f;
-    const float maxFreq = processorRef.getSampleRate() / 2.0f;
+    const float minFreq = 20.0f; //HIER
+    const float maxFreq = processorRef.getSampleRate() / 2.0f; // HIER
     const float logMin = std::log10(minFreq);
     const float logMax = std::log10(maxFreq);
 
