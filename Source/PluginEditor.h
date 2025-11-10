@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PluginProcessor.h"
+#include <juce_gui_basics/juce_gui_basics.h>
 
 //==============================================================================
 class AudioPluginAudioProcessorEditor : public juce::AudioProcessorEditor,
@@ -90,6 +91,7 @@ private:
 
     // Silder erstellen
     juce::Slider eqSlider[31];
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> eqAttachments[31];
 
     // EQ Beschriftungsbereich
     juce::Rectangle<int> eqLabelArea;
@@ -101,6 +103,9 @@ private:
     static constexpr int eqHeight = 180;
     static constexpr int spectrumHeight = 390;
     static constexpr int spectrumBottomMargin = 20;
+
+    
+    
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessorEditor)
 };

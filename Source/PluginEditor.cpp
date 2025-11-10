@@ -1,6 +1,7 @@
 ﻿#include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+
 //==============================================================================
 AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAudioProcessor& p)
     : AudioProcessorEditor (&p), processorRef (p)
@@ -79,6 +80,9 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
         eqSlider[i].setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
         eqSlider[i].setColour(juce::Slider::thumbColourId, juce::Colours::white);
         eqSlider[i].setColour(juce::Slider::trackColourId, juce::Colours::lightgrey);
+        
+        eqAttachments[i] = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+            processorRef.apvts, "band" + juce::String(i), eqSlider[i]);
 
         addAndMakeVisible(eqSlider[i]);
     }

@@ -1,21 +1,27 @@
-#include "PluginProcessor.h"
+﻿#include "PluginProcessor.h"
 #include "PluginEditor.h"
 
-//==============================================================================Hallo
+//==============================================================================
+// Konstruktor
+// Initialisiert AudioProcessor, Parameter-Layout, FFT und Fensterfunktion
 AudioPluginAudioProcessor::AudioPluginAudioProcessor()
-     : AudioProcessor (BusesProperties()
-                     #if ! JucePlugin_IsMidiEffect
-                      #if ! JucePlugin_IsSynth
-                       .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
-                      #endif
-                       .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
-                     #endif
-                       ), forwardFFT(fftOrder), window(fftSize, 
-                           juce::dsp::WindowingFunction<float>::hann)
+    : AudioProcessor(BusesProperties()
+#if ! JucePlugin_IsMidiEffect
+#if ! JucePlugin_IsSynth
+        .withInput("Input", juce::AudioChannelSet::stereo(), true)
+#endif
+        .withOutput("Output", juce::AudioChannelSet::stereo(), true)
+#endif
+    ),
+    apvts(*this, nullptr, "Parameters", createParameterLayout()),
+    forwardFFT(fftOrder), window(fftSize,
+        juce::dsp::WindowingFunction<float>::hann)
 {
-
 }
 
+//==============================================================================
+// Destruktor
+// Nullt alle Puffer beim Aufräumen, um Speicherreste zu vermeiden
 AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
 {
     juce::zeromem(fifo, sizeof(fifo));
@@ -24,6 +30,7 @@ AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
 }
 
 //==============================================================================
+// Basisinformationen über das Plugin
 const juce::String AudioPluginAudioProcessor::getName() const
 {
     return JucePlugin_Name;
@@ -31,40 +38,42 @@ const juce::String AudioPluginAudioProcessor::getName() const
 
 bool AudioPluginAudioProcessor::acceptsMidi() const
 {
-   #if JucePlugin_WantsMidiInput
+#if JucePlugin_WantsMidiInput
     return true;
-   #else
+#else
     return false;
-   #endif
+#endif
 }
 
 bool AudioPluginAudioProcessor::producesMidi() const
 {
-   #if JucePlugin_ProducesMidiOutput
+#if JucePlugin_ProducesMidiOutput
     return true;
-   #else
+#else
     return false;
-   #endif
+#endif
 }
 
 bool AudioPluginAudioProcessor::isMidiEffect() const
 {
-   #if JucePlugin_IsMidiEffect
+#if JucePlugin_IsMidiEffect
     return true;
-   #else
+#else
     return false;
-   #endif
+#endif
 }
 
+// Gibt die Länge des Nachklangs zurück (hier 0, kein Hall)
 double AudioPluginAudioProcessor::getTailLengthSeconds() const
 {
     return 0.0;
 }
 
+//==============================================================================
+// Programminformationen
 int AudioPluginAudioProcessor::getNumPrograms()
 {
-    return 1;   // NB: some hosts don't cope very well if you tell them there are 0 programs,
-                // so this should be at least 1, even if you're not really implementing programs.
+    return 1; // Wir implementieren keine Programme, aber Host benötigt ≥1
 }
 
 int AudioPluginAudioProcessor::getCurrentProgram()
@@ -72,116 +81,205 @@ int AudioPluginAudioProcessor::getCurrentProgram()
     return 0;
 }
 
-void AudioPluginAudioProcessor::setCurrentProgram (int index)
+void AudioPluginAudioProcessor::setCurrentProgram(int index)
 {
-    juce::ignoreUnused (index);
+    juce::ignoreUnused(index);
 }
 
-const juce::String AudioPluginAudioProcessor::getProgramName (int index)
+const juce::String AudioPluginAudioProcessor::getProgramName(int index)
 {
-    juce::ignoreUnused (index);
+    juce::ignoreUnused(index);
     return {};
 }
 
-void AudioPluginAudioProcessor::changeProgramName (int index, const juce::String& newName)
+void AudioPluginAudioProcessor::changeProgramName(int index, const juce::String& newName)
 {
-    juce::ignoreUnused (index, newName);
+    juce::ignoreUnused(index, newName);
 }
 
 //==============================================================================
-void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
+// Parameter-Layout erstellen
+// Erstellt ein ParameterArray mit 31 Bändern für EQ (Gain von -12dB bis +12dB)
+juce::AudioProcessorValueTreeState::ParameterLayout
+AudioPluginAudioProcessor::createParameterLayout()
 {
-    // Use this method as the place to do any pre-playback
-    // initialisation that you need..
-    juce::ignoreUnused (sampleRate, samplesPerBlock);
+    juce::AudioProcessorValueTreeState::ParameterLayout layout;
+
+    for (int i = 0; i < numBands; ++i)
+    {
+        layout.add(std::make_unique<juce::AudioParameterFloat>(
+            "band" + juce::String(i),
+            "Band " + juce::String(i),
+            juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f),
+            0.0f
+        ));
+    }
+
+    return layout;
 }
 
+//==============================================================================
+// Vorbereitung für Playback
+// Setzt DSP-Spezifikationen und initialisiert alle Filter
+void AudioPluginAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
+{
+    juce::dsp::ProcessSpec spec;
+    spec.sampleRate = sampleRate;
+    spec.maximumBlockSize = samplesPerBlock;
+    spec.numChannels = 1; // Mono pro Filter, getrennt für L/R
+
+    // Alle 31 Filter vorbereiten
+    for (int i = 0; i < numBands; ++i)
+    {
+        leftFilters[i].prepare(spec);
+        rightFilters[i].prepare(spec);
+    }
+
+    updateFilters();
+}
+
+//==============================================================================
+// Filter aktualisieren
+// Berechnet die aktuellen Biquad-Koeffizienten für jeden Band-EQ
+void AudioPluginAudioProcessor::updateFilters()
+{
+    auto sampleRate = getSampleRate();
+    if (sampleRate <= 0)
+        return;
+
+    for (int i = 0; i < numBands; ++i)
+    {
+        auto* param = apvts.getRawParameterValue("band" + juce::String(i));
+        if (param == nullptr)
+            continue;
+
+        float gainDB = param->load(); // Gain aus Parameter (dB)
+        float gainLinear = juce::Decibels::decibelsToGain(gainDB); // Linearer Gain
+        float Q = 4.32f; // Feste Bandbreite für alle Bänder
+
+        // Biquad-Koeffizienten für Peak-Filter berechnen
+        auto coeffs = juce::dsp::IIR::Coefficients<float>::makePeakFilter(
+            sampleRate,
+            filterFrequencies[i],
+            Q,
+            gainLinear
+        );
+
+        // Filter aktualisieren
+        *leftFilters[i].coefficients = *coeffs;
+        *rightFilters[i].coefficients = *coeffs;
+    }
+}
+
+//==============================================================================
+// Ressourcen freigeben
+// Wird beim Stoppen der Wiedergabe aufgerufen
 void AudioPluginAudioProcessor::releaseResources()
 {
-    // When playback stops, you can use this as an opportunity to free up any
-    // spare memory, etc.
 }
 
-bool AudioPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+//==============================================================================
+// Bus-Layout prüfen
+// Unterstützt nur Mono oder Stereo Input/Output
+bool AudioPluginAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
-  #if JucePlugin_IsMidiEffect
-    juce::ignoreUnused (layouts);
+#if JucePlugin_IsMidiEffect
+    juce::ignoreUnused(layouts);
     return true;
-  #else
-    // This is the place where you check if the layout is supported.
-    // In this template code we only support mono or stereo.
-    // Some plugin hosts, such as certain GarageBand versions, will only
-    // load plugins that support stereo bus layouts.
+#else
     if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
-     && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
+        && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
         return false;
 
-    // This checks if the input layout matches the output layout
-   #if ! JucePlugin_IsSynth
+#if ! JucePlugin_IsSynth
     if (layouts.getMainOutputChannelSet() != layouts.getMainInputChannelSet())
         return false;
-   #endif
+#endif
 
     return true;
-  #endif
+#endif
 }
 
+//==============================================================================
+// Audio-Block verarbeiten
 void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
-    // Clear any unused channels
+    updateFilters(); // Sicherstellen, dass Filter auf aktuelle Parameter reagieren
     juce::ScopedNoDenormals noDenormals;
+
+    // Überschüssige Kanäle clearen
     for (auto i = 1; i < buffer.getNumChannels(); ++i)
         buffer.clear(i, 0, buffer.getNumSamples());
 
-    // Process audio samples for spectrum analysis (use first channel only)
+    auto totalNumInputChannels = getTotalNumInputChannels();
+    auto totalNumOutputChannels = getTotalNumOutputChannels();
+
+    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
+        buffer.clear(i, 0, buffer.getNumSamples());
+
+    // Alle Kanäle filtern
+    for (int channel{ 0 }; channel < totalNumInputChannels; ++channel)
+    {
+        auto* channelData = buffer.getWritePointer(channel);
+        juce::dsp::AudioBlock<float> block(&channelData, 1, buffer.getNumSamples());
+
+        for (int i = 0; i < numBands; ++i)
+        {
+            juce::dsp::ProcessContextReplacing<float> context(block);
+
+            if (channel == 0)
+                leftFilters[i].process(context);
+            else if (channel == 1)
+                rightFilters[i].process(context);
+        }
+    }
+
+    // FFT vorbereiten (nur erster Kanal)
     if (getTotalNumInputChannels() > 0)
     {
-        auto* channelData = buffer.getReadPointer(0); // Get pointer to first channel
+        auto* channelData = buffer.getReadPointer(0);
         auto numSamples = buffer.getNumSamples();
 
-        // Push each sample into our FIFO buffer for FFT processing
         for (auto i = 0; i < numSamples; ++i)
             pushNextSampleIntoFifo(channelData[i]);
     }
 }
 
-// Collects audio samples into FIFO buffer
+//==============================================================================
+// Samples in FIFO speichern
+// FIFO wird gefüllt, bis FFT durchgeführt werden kann
 void AudioPluginAudioProcessor::pushNextSampleIntoFifo(float sample) noexcept
 {
-    // When FIFO is full, prepare data for FFT processing
     if (fifoIndex == fftSize)
     {
-        if (!nextFFTBlockReady) // Only process if previous FFT is done
+        if (!nextFFTBlockReady)
         {
-            juce::zeromem(fftData, sizeof(fftData));        // Clear FFT buffer
-            memcpy(fftData, fifo, sizeof(fifo));           // Copy audio data to FFT buffer
-            nextFFTBlockReady = true;                        // Signal that FFT data is ready
+            juce::zeromem(fftData, sizeof(fftData));
+            memcpy(fftData, fifo, sizeof(fifo));
+            nextFFTBlockReady = true; // Signalisiert, dass FFT-Daten bereit sind
         }
-        fifoIndex = 0; // Reset FIFO index
+        fifoIndex = 0;
     }
 
-    // Store the current sample and move to next position
     fifo[fifoIndex++] = sample;
 }
 
-
-
+//==============================================================================
+// Spectrum Array aktualisieren
+// Berechnet FFT, wendet Windowing an und erstellt normalisiertes Spektrum
 void AudioPluginAudioProcessor::updateSpectrumArray(double sampleRate)
 {
-    // Window anwenden
     window.multiplyWithWindowingTable(fftData, fftSize);
     forwardFFT.performFrequencyOnlyForwardTransform(fftData);
 
     auto mindB = -100.0f;
     auto maxdB = 0.0f;
 
-    // Leeres Array f�llen
     spectrumArray.clear();
     spectrumArray.reserve(scopeSize);
 
     for (int i = 0; i < scopeSize; ++i)
     {
-        // Direkt linear von FFT-Index
         int fftDataIndex = juce::jlimit(0, fftSize / 2, i * (fftSize / 2) / scopeSize);
 
         auto level = juce::jmap(
@@ -196,43 +294,37 @@ void AudioPluginAudioProcessor::updateSpectrumArray(double sampleRate)
             1.0f
         );
 
-        // Frequenz zuordnen
         float frequency = (float)fftDataIndex * (sampleRate / (float)fftSize);
         spectrumArray.push_back({ frequency, level });
     }
 }
 
-
-
 //==============================================================================
+// Editor
 bool AudioPluginAudioProcessor::hasEditor() const
 {
-    return true; // (change this to false if you choose to not supply an editor)
+    return true;
 }
 
 juce::AudioProcessorEditor* AudioPluginAudioProcessor::createEditor()
 {
-    return new AudioPluginAudioProcessorEditor (*this);
+    return new AudioPluginAudioProcessorEditor(*this);
 }
 
 //==============================================================================
-void AudioPluginAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
+// State Management
+void AudioPluginAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
-    // You should use this method to store your parameters in the memory block.
-    // You could do that either as raw data, or use the XML or ValueTree classes
-    // as intermediaries to make it easy to save and load complex data.
-    juce::ignoreUnused (destData);
+    juce::ignoreUnused(destData);
 }
 
-void AudioPluginAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
+void AudioPluginAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
-    // You should use this method to restore your parameters from this memory block,
-    // whose contents will have been created by the getStateInformation() call.
-    juce::ignoreUnused (data, sizeInBytes);
+    juce::ignoreUnused(data, sizeInBytes);
 }
 
 //==============================================================================
-// This creates new instances of the plugin..
+// Plugin Factory
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new AudioPluginAudioProcessor();
