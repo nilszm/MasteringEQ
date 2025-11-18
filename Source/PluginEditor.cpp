@@ -65,7 +65,7 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
         };
 
     // Button
-    genreErkennenButton.setButtonText("Genre erkennen");
+    genreErkennenButton.setButtonText("Messung starten / stoppen");
     genreErkennenButton.setColour(juce::TextButton::buttonColourId, juce::Colours::grey);
 
     resetButton.setButtonText("Reset");
@@ -173,6 +173,10 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
     g.setColour(juce::Colours::green);
     g.fillRect(spectrumDisplayArea);
 
+    // Innerer Display Bereich
+    g.setColour(juce::Colours::hotpink);
+    g.fillRect(spectrumInnerArea);
+
     // Vertikale Frequenzlinien im Spektrogramm zeichnen
     g.setColour(juce::Colours::white.withAlpha(0.5f));
 
@@ -185,19 +189,20 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
     // Y-Position für Achsenbeschriftung
     float textY = (float)spectrumDisplayArea.getBottom() + 3.0f;
 
+    // Vertikales Raster zeichnen
     for (auto f : frequencies)
     {
         // Frequenzen in 0-1 Bereich umrechnen
         float normX = juce::mapFromLog10(f, 20.0f, 20000.0f);
 
-        // Normierten Bereich (0-1) auf grünen Bereich skalieren
-        float x = spectrumDisplayArea.getX() + normX * spectrumDisplayArea.getWidth();
+        // Normierten Bereich (0-1) auf pinken Bereich skalieren
+        float x = spectrumInnerArea.getX() + normX * spectrumInnerArea.getWidth();
 
-        // Vertikale Linie innerhalb des grünen Bereichs zeichnen
+        // Vertikale Linie innerhalb des pinken Bereichs zeichnen
         g.drawVerticalLine(
             static_cast<int>(x),
-            (float)spectrumDisplayArea.getY(),                          // obere Grenze
-            (float)spectrumDisplayArea.getBottom()                      // untere Grenze
+            (float)spectrumInnerArea.getY(), // obere Grenze
+            (float)spectrumInnerArea.getBottom() // untere Grenze
         );
 
         // Achsenbeschriftung einfügen
@@ -219,38 +224,30 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
         );
     }
 
-    const float minDb = -100.0f;
-    const float maxDb = 0.0f;
+    const float displayMinDb = -20.0f;
+    const float displayMaxDb = 80.0f;
 
-    float textX = (float)spectrumDisplayArea.getX() - 40.0f;
+    float textX = (float)spectrumInnerArea.getX() - 40.0f;
 
     g.setColour(juce::Colours::lightgrey.withAlpha(0.5f));
 
+    /*
+    // Horizontales Raster Frequenzspektrum
     for (auto level : levels)
     {
-        float normY = juce::jmap(level, minDb, maxDb, 0.0f, 1.0f);
+        float normY = juce::jmap(level,
+            displayMinDb, displayMaxDb,
+            0.0f, 1.0f);
 
-        // Invertiertes Mapping: 0.0f dB (Maximum) ist oben (kleiner Y-Wert)
-        float y = spectrumDisplayArea.getY() + (1.0f - normY) * spectrumDisplayArea.getHeight();
+        float y = spectrumInnerArea.getY()
+            + (1.0f - normY) * spectrumInnerArea.getHeight();
 
         g.drawHorizontalLine(
-            static_cast<int>(y),
-            (float)spectrumDisplayArea.getX(),
-            (float)spectrumDisplayArea.getRight()
+            (int)y,
+            (float)spectrumInnerArea.getX(),
+            (float)spectrumInnerArea.getRight()
         );
-
-        juce::String text = juce::String((int)level) + " dB";
-
-        g.drawFittedText(
-            text,
-            (int)textX,
-            (int)(y - 7),
-            30,
-            14,
-            juce::Justification::centredRight,
-            1
-        );
-    }
+    } */
 
     // Referenzbänder zeichnen
     if (!referenceBands.empty())
@@ -258,8 +255,8 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
         // Konstanten für die Skalierung
         const float minFreq = 20.0f;
         const float maxFreq = 20000.0f;
-        const float minDb = -25.0f;
-        const float maxDb = 70.0f;
+        const float displayMinDb = DisplayScale::minDb; // 20
+        const float displayMaxDb = DisplayScale::maxDb; // 80
 
         // Pfade für die Linienpunkte
         juce::Path pathP10;
@@ -276,20 +273,20 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
             float normX = juce::mapFromLog10(band.freq, minFreq, maxFreq);
 
             // x-Position auf Fenster skalieren
-            float x = spectrumDisplayArea.getX() + normX * spectrumDisplayArea.getWidth();
+            float x = spectrumInnerArea.getX() + normX * spectrumInnerArea.getWidth();
 
             // y-Positionen invertieren (oben = laut)
-            float yP10 = juce::jmap(band.p10, minDb, maxDb,
-                (float)spectrumDisplayArea.getBottom(),
-                (float)spectrumDisplayArea.getY());
+            float yP10 = juce::jmap(band.p10, displayMinDb, displayMaxDb,
+                (float)spectrumInnerArea.getBottom(),
+                (float)spectrumInnerArea.getY());
 
-            float yMedian = juce::jmap(band.median, minDb, maxDb,
-                (float)spectrumDisplayArea.getBottom(),
-                (float)spectrumDisplayArea.getY());
+            float yMedian = juce::jmap(band.median, displayMinDb, displayMaxDb,
+                (float)spectrumInnerArea.getBottom(),
+                (float)spectrumInnerArea.getY());
 
-            float yP90 = juce::jmap(band.p90, minDb, maxDb,
-                (float)spectrumDisplayArea.getBottom(),
-                (float)spectrumDisplayArea.getY());
+            float yP90 = juce::jmap(band.p90, displayMinDb, displayMaxDb,
+                (float)spectrumInnerArea.getBottom(),
+                (float)spectrumInnerArea.getY());
 
             // Neue Linie beim ersten Punkt der JSON Datei
             if (firstPoint)
@@ -308,7 +305,7 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
             }
         }
 
-        // Zeichnen der Referenlinien
+        // Zeichnen der Referenzlinien
         g.setColour(juce::Colours::blue.withAlpha(0.6f)); // untere (p10)
         g.strokePath(pathP10, juce::PathStrokeType(1.5f));
 
@@ -318,12 +315,6 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
         g.setColour(juce::Colours::grey); // Median
         g.strokePath(pathMedian, juce::PathStrokeType(2.0f));
     }
-
-
-
-
-
-
 
     // EQ Bereich färben
     g.setColour(juce::Colours::blue);
@@ -388,7 +379,7 @@ void AudioPluginAudioProcessorEditor::resized()
     genreBox.setBounds(710, 5, 220, 30);
 
     // Button Position (x-Position, y-Position, x-Breite, y-Höhe)
-    genreErkennenButton.setBounds(10, 5, 120, 30);
+    genreErkennenButton.setBounds(10, 5, 200, 30);
     resetButton.setBounds(940, 5, 50, 30);
 
     // Restbereich unter der Topbar
@@ -425,6 +416,21 @@ void AudioPluginAudioProcessorEditor::resized()
             sliderHeight
         );
     }
+
+    // Innerer Spektrumsbereich auf Sliderbreite setzen
+    const int firstIndex = 0;
+    const int lastIndex = 30;
+
+    int leftX = eqSlider[firstIndex].getX() + eqSlider[firstIndex].getWidth() / 2;
+    int rightX = eqSlider[lastIndex].getX() + eqSlider[lastIndex].getWidth() / 2;
+    int innerWidth = rightX - leftX;
+
+    spectrumInnerArea = juce::Rectangle<int>(
+        leftX,
+        spectrumDisplayArea.getY(),
+        innerWidth,
+        spectrumDisplayArea.getHeight()
+    );
     
     // EQ Beschriftung
     eqLabelArea = eqArea.removeFromBottom(30);
@@ -452,22 +458,35 @@ void AudioPluginAudioProcessorEditor::drawFrame(juce::Graphics& g)
     if (spectrum.empty())
         return;
 
-    auto area = spectrumDisplayArea.toFloat();
-    const float minFreq = 20.0f; //HIER
-    const float maxFreq = processorRef.getSampleRate() / 2.0f; // HIER
+    auto area = spectrumInnerArea.toFloat();
+
+    const float minFreq = 20.0f;
+    const float maxFreq = processorRef.getSampleRate() / 2.0f;
+
     const float logMin = std::log10(minFreq);
     const float logMax = std::log10(maxFreq);
 
     juce::Path path;
     bool firstPoint = true;
+
     for (auto& point : spectrum)
     {
-        if (point.frequency < minFreq)
+        if (point.frequency < minFreq || point.frequency > maxFreq)
             continue;
 
         float logFreq = std::log10(point.frequency);
-        float x = area.getX() + juce::jmap(logFreq, logMin, logMax, 0.0f, 1.0f) * area.getWidth();
-        float y = juce::jmap(point.level, 0.0f, 1.0f, area.getBottom(), area.getY());
+        float normX = juce::jmap(logFreq, logMin, logMax, 0.0f, 1.0f);
+        float x = area.getX() + normX * area.getWidth();
+
+        float db = point.level;
+
+        db = juce::jlimit(DisplayScale::minDb,
+            DisplayScale::maxDb,
+            db);
+
+        float y = juce::jmap(db,
+            DisplayScale::minDb, DisplayScale::maxDb,
+            area.getBottom(), area.getY());
 
         if (firstPoint)
         {
@@ -475,7 +494,9 @@ void AudioPluginAudioProcessorEditor::drawFrame(juce::Graphics& g)
             firstPoint = false;
         }
         else
+        {
             path.lineTo(x, y);
+        }
     }
 
     g.setColour(juce::Colours::cyan);

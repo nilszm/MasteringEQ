@@ -3,6 +3,13 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
 
+namespace DisplayScale
+{
+    constexpr float offsetDb = 100.0f; // dBFS -> Display-Einheit
+    constexpr float minDb = 20.0f; // Untere Anzeigegrenze
+    constexpr float maxDb = 80.0f; // Obere Anzeigegrenze
+}
+
 //==============================================================================
 // Hauptklasse des Plugins
 // Enthält EQ-Filter (31-Band), FFT-basiertes Spektrum und Parameterverwaltung

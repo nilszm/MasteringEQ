@@ -269,33 +269,50 @@ void AudioPluginAudioProcessor::pushNextSampleIntoFifo(float sample) noexcept
 // Berechnet FFT, wendet Windowing an und erstellt normalisiertes Spektrum
 void AudioPluginAudioProcessor::updateSpectrumArray(double sampleRate)
 {
+    // Fensterung
     window.multiplyWithWindowingTable(fftData, fftSize);
     forwardFFT.performFrequencyOnlyForwardTransform(fftData);
 
-    auto mindB = -100.0f;
-    auto maxdB = 0.0f;
+    // Anzeigebereich für FFT und JSON Referenz
+    const float displayMinDb = -20.0f;
+    const float displayMaxDb = 80.0f;
 
     spectrumArray.clear();
     spectrumArray.reserve(scopeSize);
 
+    // Amplituden normieren
+    const float fftNorm = (float)fftSize;
+
     for (int i = 0; i < scopeSize; ++i)
     {
-        int fftDataIndex = juce::jlimit(0, fftSize / 2, i * (fftSize / 2) / scopeSize);
+        int fftDataIndex = juce::jlimit(0, fftSize / 2,
+                                        i * (fftSize / 2) / scopeSize);
 
-        auto level = juce::jmap(
-            juce::jlimit(
-                mindB,
-                maxdB,
-                juce::Decibels::gainToDecibels(fftData[fftDataIndex]) - juce::Decibels::gainToDecibels((float)fftSize)
-            ),
-            mindB,
-            maxdB,
-            0.0f,
-            1.0f
-        );
+        // Werte aus der FFT
+        float mag = fftData[fftDataIndex];
 
+        // Normieren
+        mag /= fftNorm;
+
+        if (mag <= 0.0f)
+            mag = 1.0e-9f; // Schutz vor log(0)
+
+        // 1) dbFS nutzen
+        float dbFs = juce::Decibels::gainToDecibels(mag);
+
+        // In dB umrechnen
+        float displayDb = dbFs + DisplayScale::offsetDb;
+
+        // Auf Ausgangsbereich begrenzen
+        displayDb = juce::jlimit(DisplayScale::minDb,
+            DisplayScale::maxDb,
+            displayDb);
+
+        // Frequenz dieses Bins
         float frequency = (float)fftDataIndex * (sampleRate / (float)fftSize);
-        spectrumArray.push_back({ frequency, level });
+
+        // Speichern
+        spectrumArray.push_back({ frequency, displayDb });
     }
 }
 

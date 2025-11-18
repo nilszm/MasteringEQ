@@ -47,8 +47,11 @@ private:
     // Spektrogramm + Beschriftung Bereich einfügen
     juce::Rectangle<int> spectrogramArea;
 
-    // Spektrogramm Display Bereich für Kurve
+    // Spektrogramm Display Bereich
     juce::Rectangle<int> spectrumDisplayArea;
+
+    // Spektrogramm innerer Bereich
+    juce::Rectangle<int> spectrumInnerArea;
 
     // EQ Fader mit Array erzeugen
     const std::array<float, 31> eqFrequencies
@@ -68,7 +71,7 @@ private:
 
     juce::Array<float> levels
     {
-        -100.0f, -50.0f, -20.0f, -6.0f, 0.0f
+        -20.0f, 0.0f, 20.0f, 40.0f, 60.0f, 80.0f
     };
 
     // Struct für Referenzkurven
