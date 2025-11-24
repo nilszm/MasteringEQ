@@ -86,6 +86,8 @@ public:
     juce::AudioProcessorValueTreeState apvts;
     void updateFilters(); // Aktualisiert alle Bandfilter mit aktuellen Parametern
 
+    void AudioPluginAudioProcessor::resetAllBandsToDefault();
+
 private:
     //==============================================================================
     // Parameter-Layout erstellen (31-Band EQ)
@@ -96,6 +98,8 @@ private:
 
     std::array<Filter, numBands> leftFilters;   // Linker Kanal
     std::array<Filter, numBands> rightFilters;  // Rechter Kanal
+
+    
 
     // Festgelegte Filterfrequenzen für 31 Bänder
     const std::array<float, numBands> filterFrequencies = {

@@ -69,6 +69,10 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
 
     resetButton.setButtonText("Reset");
     resetButton.setColour(juce::TextButton::buttonColourId, juce::Colours::red);
+    resetButton.onClick = [this]
+        {
+            processorRef.resetAllBandsToDefault();
+        };
 
     // Silder konfigurieren
     for (int i = 0; i < 31; i++)
@@ -179,7 +183,7 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
     // Vertikale Frequenzlinien im Spektrogramm zeichnen
     g.setColour(juce::Colours::white.withAlpha(0.5f));
 
-    // Draw the spectrum
+    // Zeichne das Spektrum
     drawFrame(g);
 
     // Schriftgröße für Achsenbeschriftung
@@ -188,7 +192,7 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
     // Y-Position für Achsenbeschriftung
     float textY = (float)spectrumDisplayArea.getBottom() + 3.0f;
 
-    // Vertikales Raster zeichnen
+    // <Vertikales Horizontales Raster zeichnen
     for (auto f : frequencies)
     {
         // Frequenzen in 0-1 Bereich umrechnen
@@ -227,26 +231,7 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
     const float displayMaxDb = 80.0f;
 
     float textX = (float)spectrumInnerArea.getX() - 40.0f;
-
     g.setColour(juce::Colours::lightgrey.withAlpha(0.5f));
-
-    /*
-    // Horizontales Raster Frequenzspektrum
-    for (auto level : levels)
-    {
-        float normY = juce::jmap(level,
-            displayMinDb, displayMaxDb,
-            0.0f, 1.0f);
-
-        float y = spectrumInnerArea.getY()
-            + (1.0f - normY) * spectrumInnerArea.getHeight();
-
-        g.drawHorizontalLine(
-            (int)y,
-            (float)spectrumInnerArea.getX(),
-            (float)spectrumInnerArea.getRight()
-        );
-    } */
 
     // Referenzbänder zeichnen
     if (!referenceBands.empty())
@@ -438,16 +423,16 @@ void AudioPluginAudioProcessorEditor::resized()
     
 }
 
-// Timer callback - updates the display
+// Timer callback Displayupdate
 void AudioPluginAudioProcessorEditor::timerCallback()
 {
-    // Check if new FFT data is available
+    // Überprüft ob FFT-Daten verfügbar sind
     if (processorRef.getNextFFTBlockReady())
     {
-        // Process the FFT data for display
+        // Verarbeitet die FFT Daten zur darstellung
         processorRef.updateSpectrumArray(processorRef.getSampleRate());
         processorRef.setNextFFTBlockReady(false); // Reset flag
-        repaint(); // Trigger redraw
+        repaint(); // Triggert Redraw
     }
 }
 
@@ -459,7 +444,7 @@ void AudioPluginAudioProcessorEditor::drawFrame(juce::Graphics& g)
 
     auto area = spectrumInnerArea.toFloat();
     const float minFreq = 20.0f;
-    const float maxFreq = processorRef.getSampleRate() / 2.0f;
+    const float maxFreq = 20000.0f;
     const float logMin = std::log10(minFreq);
     const float logMax = std::log10(maxFreq);
 
@@ -472,11 +457,11 @@ void AudioPluginAudioProcessorEditor::drawFrame(juce::Graphics& g)
         if (point.frequency  < minFreq || point.frequency > maxFreq)
             continue;
 
-        // X-Position für Frequenz berechnen
+        // X-Position berechnen (Frequenz)
         float logFreq = std::log10(point.frequency);
         float x = area.getX() + juce::jmap(logFreq, logMin, logMax, 0.0f, 1.0f) * area.getWidth();
 
-        // Y-Position für dB-Wert berechnen
+        // Y-Position berechnen (dB-Werte)
         float db = juce::jlimit(DisplayScale::minDb, DisplayScale::maxDb, point.level);
         float y = juce::jmap(db, DisplayScale::minDb, DisplayScale::maxDb, area.getBottom(), area.getY());
 

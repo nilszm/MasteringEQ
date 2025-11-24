@@ -171,6 +171,18 @@ void AudioPluginAudioProcessor::updateFilters()
     }
 }
 
+void AudioPluginAudioProcessor::resetAllBandsToDefault()
+{
+    for (int i = 0; i < numBands; ++i)
+    {
+        juce::String paramID = "band" + juce::String(i);
+        if (auto* p = dynamic_cast<juce::RangedAudioParameter*>(apvts.getParameter(paramID)))
+            p->setValueNotifyingHost(p->getDefaultValue());
+    }
+
+    updateFilters();
+}
+
 //==============================================================================
 // Ressourcen freigeben
 // Wird beim Stoppen der Wiedergabe aufgerufen
