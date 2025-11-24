@@ -448,36 +448,108 @@ void AudioPluginAudioProcessorEditor::drawFrame(juce::Graphics& g)
     const float logMin = std::log10(minFreq);
     const float logMax = std::log10(maxFreq);
 
-    // Path für die Spektrumlinie erstellen
-    juce::Path spectrumPath;
-    bool firstPoint = true;
+    // Temporal smoothing parameter (0.0 = instant, higher = more sluggish)
+    // Use as class member: float smoothingFactor = 0.8f;
+    const float smoothingFactor = 0.8f; // Adjust between 0.0 - 0.95
 
-    for (auto& point : spectrum)
+    // Filter and smooth valid points
+    std::vector<juce::Point<float>> validPoints;
+
+    for (size_t i = 0; i < spectrum.size(); ++i)
     {
-        if (point.frequency  < minFreq || point.frequency > maxFreq)
+        auto& point = spectrum[i];
+        if (point.frequency < minFreq || point.frequency > maxFreq)
             continue;
 
-        // X-Position berechnen (Frequenz)
-        float logFreq = std::log10(point.frequency);
-        float x = area.getX() + juce::jmap(logFreq, logMin, logMax, 0.0f, 1.0f) * area.getWidth();
-
-        // Y-Position berechnen (dB-Werte)
-        float db = juce::jlimit(DisplayScale::minDb, DisplayScale::maxDb, point.level);
-        float y = juce::jmap(db, DisplayScale::minDb, DisplayScale::maxDb, area.getBottom(), area.getY());
-
-        // Pfad aufbauen
-        if (firstPoint)
+        // Apply exponential smoothing to level
+        // Store previous values in a class member: std::vector<float> previousLevels;
+        float smoothedLevel = point.level;
+        if (i < previousLevels.size())
         {
-            spectrumPath.startNewSubPath(x, y);
-            firstPoint = false;
+            smoothedLevel = smoothingFactor * previousLevels[i] + (1.0f - smoothingFactor) * point.level;
+            previousLevels[i] = smoothedLevel;
         }
         else
         {
+            previousLevels.push_back(smoothedLevel);
+        }
+
+        float logFreq = std::log10(point.frequency);
+        float x = area.getX() + juce::jmap(logFreq, logMin, logMax, 0.0f, 1.0f) * area.getWidth();
+        float db = juce::jlimit(DisplayScale::minDb, DisplayScale::maxDb, smoothedLevel);
+        float y = juce::jmap(db, DisplayScale::minDb, DisplayScale::maxDb, area.getBottom(), area.getY());
+
+        validPoints.push_back({ x, y });
+    }
+
+    // Extrapolate down to 20 Hz if first point is above 20 Hz
+    if (!validPoints.empty() && spectrum[0].frequency > minFreq)
+    {
+        // Use linear extrapolation from first two points
+        if (validPoints.size() >= 2)
+        {
+            float freq1 = spectrum[0].frequency;
+            float freq2 = spectrum[1].frequency;
+            float level1 = previousLevels[0];
+            float level2 = previousLevels[1];
+
+            // Extrapolate level at 20 Hz
+            float slope = (level2 - level1) / (freq2 - freq1);
+            float extrapolatedLevel = level1 + slope * (minFreq - freq1);
+            extrapolatedLevel = juce::jlimit(DisplayScale::minDb, DisplayScale::maxDb, extrapolatedLevel);
+
+            float x = area.getX();
+            float y = juce::jmap(extrapolatedLevel, DisplayScale::minDb, DisplayScale::maxDb,
+                area.getBottom(), area.getY());
+
+            validPoints.insert(validPoints.begin(), { x, y });
+        }
+    }
+
+    if (validPoints.size() < 2)
+        return;
+
+    // Create smooth path using cubic Hermite spline interpolation
+    juce::Path spectrumPath;
+    spectrumPath.startNewSubPath(validPoints[0]);
+
+    for (size_t i = 0; i < validPoints.size() - 1; ++i)
+    {
+        auto p0 = (i > 0) ? validPoints[i - 1] : validPoints[i];
+        auto p1 = validPoints[i];
+        auto p2 = validPoints[i + 1];
+        auto p3 = (i + 2 < validPoints.size()) ? validPoints[i + 2] : validPoints[i + 1];
+
+        // Calculate tangents (Catmull-Rom style)
+        // Tension = 0.5 for standard Catmull-Rom
+        float tension = 0.5f;
+        auto m1 = (p2 - p0) * tension;
+        auto m2 = (p3 - p1) * tension;
+
+        // Number of interpolation steps between points
+        int steps = 20;
+
+        for (int step = 1; step <= steps; ++step)
+        {
+            float t = step / float(steps);
+            float t2 = t * t;
+            float t3 = t2 * t;
+
+            // Cubic Hermite basis functions
+            float h00 = 2 * t3 - 3 * t2 + 1;
+            float h10 = t3 - 2 * t2 + t;
+            float h01 = -2 * t3 + 3 * t2;
+            float h11 = t3 - t2;
+
+            // Interpolate position
+            float x = h00 * p1.x + h10 * m1.x + h01 * p2.x + h11 * m2.x;
+            float y = h00 * p1.y + h10 * m1.y + h01 * p2.y + h11 * m2.y;
+
             spectrumPath.lineTo(x, y);
         }
     }
 
-    // Linie zeichnen
+    // Draw the smooth curve
     g.setColour(juce::Colours::cyan);
     g.strokePath(spectrumPath, juce::PathStrokeType(2.0f));
 }

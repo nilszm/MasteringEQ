@@ -113,7 +113,7 @@ private:
     //==============================================================================
     // FFT / Spectrum Analyzer
     enum {
-        fftOrder = 11,
+        fftOrder = 12,
         fftSize = 1 << fftOrder,
         scopeSize = 512
     };

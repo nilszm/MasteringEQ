@@ -24,6 +24,9 @@ private:
     // Timer callback for GUI updates
     void timerCallback() override;
 
+    // Für temporal smoothing
+    std::vector<float> previousLevels;
+
     // Helper function to draw the spectrum
     void drawFrame(juce::Graphics& g);
 
