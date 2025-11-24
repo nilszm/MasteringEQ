@@ -6,15 +6,14 @@
 AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAudioProcessor& p)
     : AudioProcessorEditor (&p), processorRef (p)
 {
-    juce::ignoreUnused (processorRef);
-
-    // Fenster Einstellungen
-    //x-Breite, y-Höhe
-    setSize(1000, 650);
+    // Timer für FFT erzeugen
     startTimerHz(30);  // Update display at 30 FPS
-    setResizable(false, false);
 
-    // Dropdown
+    // Fenster Einstellungen, x-Breite, y-Höhe
+    setSize(1000, 650);
+    setResizable(false, false);
+    
+    // Dropdown-Menue
     genreBox.setTextWhenNothingSelected("Genre auswahlen...");
     genreBox.addItem("Pop", 1);
     genreBox.addItem("HipHop", 2);
@@ -459,46 +458,41 @@ void AudioPluginAudioProcessorEditor::drawFrame(juce::Graphics& g)
         return;
 
     auto area = spectrumInnerArea.toFloat();
-
     const float minFreq = 20.0f;
     const float maxFreq = processorRef.getSampleRate() / 2.0f;
-
     const float logMin = std::log10(minFreq);
     const float logMax = std::log10(maxFreq);
 
-    juce::Path path;
+    // Path für die Spektrumlinie erstellen
+    juce::Path spectrumPath;
     bool firstPoint = true;
 
     for (auto& point : spectrum)
     {
-        if (point.frequency < minFreq || point.frequency > maxFreq)
+        if (point.frequency  < minFreq || point.frequency > maxFreq)
             continue;
 
+        // X-Position für Frequenz berechnen
         float logFreq = std::log10(point.frequency);
-        float normX = juce::jmap(logFreq, logMin, logMax, 0.0f, 1.0f);
-        float x = area.getX() + normX * area.getWidth();
+        float x = area.getX() + juce::jmap(logFreq, logMin, logMax, 0.0f, 1.0f) * area.getWidth();
 
-        float db = point.level;
+        // Y-Position für dB-Wert berechnen
+        float db = juce::jlimit(DisplayScale::minDb, DisplayScale::maxDb, point.level);
+        float y = juce::jmap(db, DisplayScale::minDb, DisplayScale::maxDb, area.getBottom(), area.getY());
 
-        db = juce::jlimit(DisplayScale::minDb,
-            DisplayScale::maxDb,
-            db);
-
-        float y = juce::jmap(db,
-            DisplayScale::minDb, DisplayScale::maxDb,
-            area.getBottom(), area.getY());
-
+        // Pfad aufbauen
         if (firstPoint)
         {
-            path.startNewSubPath(x, y);
+            spectrumPath.startNewSubPath(x, y);
             firstPoint = false;
         }
         else
         {
-            path.lineTo(x, y);
+            spectrumPath.lineTo(x, y);
         }
     }
 
+    // Linie zeichnen
     g.setColour(juce::Colours::cyan);
-    g.strokePath(path, juce::PathStrokeType(2.0f));
+    g.strokePath(spectrumPath, juce::PathStrokeType(2.0f));
 }
