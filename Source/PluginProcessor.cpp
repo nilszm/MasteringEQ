@@ -105,6 +105,15 @@ AudioPluginAudioProcessor::createParameterLayout()
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
 
+    // Input Gain Parameter hinzufügen
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        "inputGain",
+        "Input Gain",
+        juce::NormalisableRange<float>(-24.0f, 24.0f, 0.1f),
+        0.0f  // Default-Wert
+    ));
+
+    // Die 31 EQ Bänder
     for (int i = 0; i < numBands; ++i)
     {
         layout.add(std::make_unique<juce::AudioParameterFloat>(
@@ -228,6 +237,19 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
 
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear(i, 0, buffer.getNumSamples());
+
+    // Input Gain anwenden
+    float inputGainDb = apvts.getRawParameterValue("inputGain")->load();
+    float inputGainLinear = juce::Decibels::decibelsToGain(inputGainDb);
+
+    for (int channel = 0; channel < totalNumInputChannels; ++channel)
+    {
+        auto* channelData = buffer.getWritePointer(channel);
+        for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+        {
+            channelData[sample] *= inputGainLinear;
+        }
+    }
 
     // Alle Input-Kanäle filtern
     for (int channel = 0; channel < totalNumInputChannels; ++channel)

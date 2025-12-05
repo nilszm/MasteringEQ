@@ -2,6 +2,7 @@
 
 #include "PluginProcessor.h"
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <complex>  // <-- HINZUFÜGEN für std::complex
 
 //==============================================================================
 class AudioPluginAudioProcessorEditor : public juce::AudioProcessorEditor,
@@ -23,6 +24,11 @@ private:
     // access the processor object that created it.
     // Timer callback for GUI updates
     void timerCallback() override;
+
+    // Input Gain Slider und Label
+    juce::Slider inputGainSlider;
+    juce::Label inputGainLabel;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> inputGainAttachment;
 
     // Für temporal smoothing
     std::vector<float> previousLevels;
@@ -57,7 +63,7 @@ private:
     juce::Rectangle<int> spectrumInnerArea;
 
     // EQ Fader mit Array erzeugen
-    const std::array<float, 31> eqFrequencies
+    const std::array<float, 31> eqFrequencies = // <-- = hinzugefügt
     {
         20, 25, 31.5, 40, 50, 63, 80, 100, 125, 160,
         200, 250, 315, 400, 500, 630, 800, 1000, 1250, 1600,
@@ -65,14 +71,14 @@ private:
     };
 
     // Array für vertikale Linien im Spektrogramm
-    juce::Array<float> frequencies
+    juce::Array<float> frequencies =  // <-- = hinzugefügt
     {
         20, 50, 100,
         200, 500, 1000,
         2000, 5000, 10000, 20000
     };
 
-    juce::Array<float> levels
+    juce::Array<float> levels =  // <-- = hinzugefügt
     {
         -20.0f, 0.0f, 20.0f, 40.0f, 60.0f, 80.0f
     };
@@ -102,6 +108,17 @@ private:
     // EQ Beschriftungsbereich
     juce::Rectangle<int> eqLabelArea;
 
+    bool showEQCurve = false;
+    juce::TextButton eqCurveToggleButton;
+    float eqDisplayOffsetDb = 0.0f;
+
+    // in class AudioPluginAudioProcessorEditor
+    float averagedSpectrumDb = DisplayScale::minDb;  // or e.g. -60.0f
+
+    // Bei den Funktionen hinzufügen:
+    std::complex<float> peakingEQComplex(float freq, float f0, float Q, float gainDb, float sampleRate);
+    void drawEQCurve(juce::Graphics& g);
+
     // Layout Konstanten
     static constexpr int topBarHeight = 40; // Höhe der Topbar für Buttons und Dropdown
     static constexpr int spectrogramOuterHeight = 430;
@@ -110,8 +127,5 @@ private:
     static constexpr int spectrumHeight = 390;
     static constexpr int spectrumBottomMargin = 20;
 
-    
-    
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessorEditor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioPluginAudioProcessorEditor)
 };
