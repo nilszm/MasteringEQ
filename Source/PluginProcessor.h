@@ -86,7 +86,7 @@ public:
     juce::AudioProcessorValueTreeState apvts;
     void updateFilters(); // Aktualisiert alle Bandfilter mit aktuellen Parametern
 
-    void AudioPluginAudioProcessor::resetAllBandsToDefault();
+    void resetAllBandsToDefault();
 
 private:
     //==============================================================================

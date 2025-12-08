@@ -10,7 +10,7 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
     startTimerHz(30);  // Update display at 30 FPS
 
     // Fenster Einstellungen, x-Breite, y-Höhe
-    setSize(1000, 650);
+    setSize(1000, 690);
     setResizable(false, false);
     
     // Dropdown-Menue
@@ -100,6 +100,26 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
             processorRef.apvts, "band" + juce::String(i), eqSlider[i]);
 
         addAndMakeVisible(eqSlider[i]);
+    }
+
+    // Q Knobs konfigurieren
+    for (int i = 0; i < 31; ++i)
+    {
+        eqKnob[i].setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        eqKnob[i].setRange(0.3, 10.0, 0.01); // selbe Range wie Parameter
+        eqKnob[i].setValue(4.32); // Default Q
+        eqKnob[i].setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+
+        // Optik kannst du später verfeinern
+        eqKnob[i].setColour(juce::Slider::thumbColourId, juce::Colours::white);
+        eqKnob[i].setColour(juce::Slider::rotarySliderFillColourId, juce::Colours::darkgrey);
+        eqKnob[i].setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colours::black);
+
+        // Attachment: dieser Knob steuert qBand<i>
+        eqQAttachments[i] = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+            processorRef.apvts, "bandQ" + juce::String(i), eqKnob[i]);
+
+        addAndMakeVisible(eqKnob[i]);
     }
 
     // Sichtbar machen
@@ -341,13 +361,18 @@ void AudioPluginAudioProcessorEditor::paint(juce::Graphics& g)
         g.strokePath(pathMedian, juce::PathStrokeType(2.0f));
     }
 
-    // EQ Bereich färben
+    // EQ Sliderbereich (blau)
     g.setColour(juce::Colours::blue);
     g.fillRect(eqArea);
 
-    // EQ Beschriftungsbereich
+    // Q-Bereich (hellgrün)
+    g.setColour(juce::Colours::lightgreen);
+    g.fillRect(eqKnobArea);
+
+    // EQ Beschriftungsbereich (rot)
     g.setColour(juce::Colours::red);
     g.fillRect(eqLabelArea);
+
 
     // Slider Beschriftung
     g.setColour(juce::Colours::white.withAlpha(0.5f));
@@ -404,7 +429,7 @@ void AudioPluginAudioProcessorEditor::resized()
     genreBox.setBounds(710, 5, 220, 30);
 
     // Input Gain Slider - UNTER dem Dropdown
-    inputGainSlider.setBounds(710, 40, 220, 30); 
+    inputGainSlider.setBounds(770, 45, 220, 30); 
 
     // Button Position (x-Position, y-Position, x-Breite, y-Höhe)
     genreErkennenButton.setBounds(10, 5, 200, 30);
@@ -425,9 +450,18 @@ void AudioPluginAudioProcessorEditor::resized()
     spectrumDisplayArea = spectrogramArea.removeFromTop(spectrumHeight);
 
     // EQ Bereich
-    eqArea = rest.removeFromTop(eqHeight);
+    auto eqFullArea = rest.removeFromTop(eqHeight);
 
-    // Silder
+    // EQ Beschriftung
+    eqLabelArea = eqFullArea.removeFromBottom(eqLabelHeight);
+
+    // Q Filter
+    eqKnobArea = eqFullArea.removeFromBottom(eqSpacerHeight);
+
+    // Silder Bereich
+    eqArea = eqFullArea;
+
+    // Silder setzen
     for (int i = 0; i < 31; ++i)
     {
         // Frequenz in log-Skala umrechnen
@@ -437,7 +471,11 @@ void AudioPluginAudioProcessorEditor::resized()
         int x = eqArea.getX() + static_cast<int>(normX * eqArea.getWidth());
 
         int sliderWidth = 16;
-        int sliderHeight = eqArea.getHeight() - 40;
+
+        const int verticalMargin = 8;
+
+        int sliderHeight = eqArea.getHeight() - 2 * verticalMargin;
+        int sliderY = eqArea.getY() + verticalMargin;
 
         eqSlider[i].setBounds(
             x - sliderWidth / 2,
@@ -445,6 +483,22 @@ void AudioPluginAudioProcessorEditor::resized()
             sliderWidth,
             sliderHeight
         );
+    }
+
+    // Q Knobs setzen
+    for (int i = 0; i < 31; ++i)
+    {
+        int centerX = eqSlider[i].getX() + eqSlider[i].getWidth() / 2;
+
+        float bandWidth = (float)eqArea.getWidth() / 31.0f;
+
+        // z.B. 1.4x Bandbreite, aber nicht höher als der grüne Bereich
+        int knobDiameter = (int)std::floor(bandWidth * 1.3f);
+
+        int x = centerX - knobDiameter / 2;
+        int y = eqKnobArea.getCentreY() - knobDiameter / 2;
+
+        eqKnob[i].setBounds(x, y, knobDiameter, knobDiameter);
     }
 
     // Innerer Spektrumsbereich auf Sliderbreite setzen
@@ -460,13 +514,7 @@ void AudioPluginAudioProcessorEditor::resized()
         spectrumDisplayArea.getY(),
         innerWidth,
         spectrumDisplayArea.getHeight()
-    );
-    
-    // EQ Beschriftung
-    eqLabelArea = eqArea.removeFromBottom(30);
-
-
-    
+    );   
 }
 
 // Timer callback Displayupdate
@@ -570,7 +618,6 @@ void AudioPluginAudioProcessorEditor::drawEQCurve(juce::Graphics& g)
     const int numPoints = 2000;
     const float minFreq = 20.0f;
     const float maxFreq = 20000.0f;
-    const float Q = 4.2f;
 
     std::vector<float> frequencies;
     frequencies.reserve(numPoints);
@@ -594,6 +641,7 @@ void AudioPluginAudioProcessorEditor::drawEQCurve(juce::Graphics& g)
     {
         float f0 = eqFrequencies[bandIdx];
         float gainDb = eqSlider[bandIdx].getValue();
+        float Q = eqKnob[bandIdx].getValue();
 
         if (std::abs(gainDb) > 0.01f)
         {

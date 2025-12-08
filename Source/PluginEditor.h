@@ -105,6 +105,11 @@ private:
     juce::Slider eqSlider[31];
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> eqAttachments[31];
 
+    // Q-Bereich
+    juce::Rectangle<int> eqKnobArea;
+    juce::Slider eqKnob[31];
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> eqQAttachments[31];
+
     // EQ Beschriftungsbereich
     juce::Rectangle<int> eqLabelArea;
 
@@ -123,7 +128,11 @@ private:
     static constexpr int topBarHeight = 40; // Höhe der Topbar für Buttons und Dropdown
     static constexpr int spectrogramOuterHeight = 430;
     static constexpr int spectrogramMargin = 10;
-    static constexpr int eqHeight = 180;
+    // static constexpr int eqHeight = 180;
+    static constexpr int eqLabelHeight = 30;
+    static constexpr int eqSpacerHeight = 40;
+    static constexpr int eqHeight = 180 + eqSpacerHeight;
+    //
     static constexpr int spectrumHeight = 390;
     static constexpr int spectrumBottomMargin = 20;
 

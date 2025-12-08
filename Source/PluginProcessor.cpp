@@ -113,6 +113,17 @@ AudioPluginAudioProcessor::createParameterLayout()
         0.0f  // Default-Wert
     ));
 
+    // 31 Q - Parameter(Filtergüte)
+        for (int i = 0; i < numBands; ++i)
+        {
+            layout.add(std::make_unique<juce::AudioParameterFloat>(
+                "bandQ" + juce::String(i),
+                "Band Q " + juce::String(i),
+                juce::NormalisableRange<float>(0.3f, 10.0f, 0.01f),
+                4.32f // Default
+            ));
+        }
+
     // Die 31 EQ Bänder
     for (int i = 0; i < numBands; ++i)
     {
@@ -158,13 +169,14 @@ void AudioPluginAudioProcessor::updateFilters()
 
     for (int i = 0; i < numBands; ++i)
     {
-        auto* param = apvts.getRawParameterValue("band" + juce::String(i));
-        if (param == nullptr)
+        auto* gainParam = apvts.getRawParameterValue("band" + juce::String(i));
+        auto* qParam = apvts.getRawParameterValue("bandQ" + juce::String(i));
+        if (gainParam == nullptr || qParam == nullptr)
             continue;
 
-        float gainDB = param->load(); // Gain aus Parameter (dB)
+        float gainDB = gainParam->load(); // Gain aus Parameter (dB)
         float gainLinear = juce::Decibels::decibelsToGain(gainDB); // Linearer Gain
-        float Q = 4.32f; // Feste Bandbreite für alle Bänder
+        float Q = qParam->load(); // Bandbreite für jedes Band
 
         // Biquad-Koeffizienten für Peak-Filter berechnen
         auto coeffs = juce::dsp::IIR::Coefficients<float>::makePeakFilter(
@@ -184,9 +196,19 @@ void AudioPluginAudioProcessor::resetAllBandsToDefault()
 {
     for (int i = 0; i < numBands; ++i)
     {
-        juce::String paramID = "band" + juce::String(i);
-        if (auto* p = dynamic_cast<juce::RangedAudioParameter*>(apvts.getParameter(paramID)))
-            p->setValueNotifyingHost(p->getDefaultValue());
+        // Gain zurücksetzen
+        {
+            juce::String paramID = "band" + juce::String(i);
+            if (auto* p = dynamic_cast<juce::RangedAudioParameter*>(apvts.getParameter(paramID)))
+                p->setValueNotifyingHost(p->getDefaultValue());
+        }
+
+        // NEU: Q zurücksetzen
+        {
+            juce::String qID = "bandQ" + juce::String(i);
+            if (auto* pQ = dynamic_cast<juce::RangedAudioParameter*>(apvts.getParameter(qID)))
+                pQ->setValueNotifyingHost(pQ->getDefaultValue());
+        }
     }
 
     updateFilters();
