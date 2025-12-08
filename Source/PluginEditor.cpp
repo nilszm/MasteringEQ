@@ -6,6 +6,9 @@
 AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAudioProcessor& p)
     : AudioProcessorEditor (&p), processorRef (p)
 {
+    // Start
+    showEQCurve = false;
+
     // Timer für FFT erzeugen
     startTimerHz(30);  // Update display at 30 FPS
 
@@ -75,12 +78,19 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
         };
 
     // EQ Curve Toggle Button
-    eqCurveToggleButton.setButtonText("EQ Kurve");
-    eqCurveToggleButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkblue);
+    eqCurveToggleButton.setButtonText("EQ Ansicht");
     eqCurveToggleButton.setClickingTogglesState(true);
+    eqCurveToggleButton.setToggleState(false, juce::dontSendNotification);
+
     eqCurveToggleButton.onClick = [this]
         {
             showEQCurve = eqCurveToggleButton.getToggleState();
+
+            if (showEQCurve)
+                eqCurveToggleButton.setButtonText("Referenz Ansicht");
+            else
+                eqCurveToggleButton.setButtonText("EQ Ansicht");
+
             repaint();
         };
 
@@ -132,6 +142,10 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
     inputGainSlider.setRange(-24.0, 24.0, 0.1);
     inputGainSlider.setValue(0.0);
     inputGainSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20); // <-- GEÄNDERT
+    inputGainSlider.setColour(juce::Slider::textBoxOutlineColourId,
+        juce::Colours::transparentBlack);
+    inputGainSlider.setColour(juce::Slider::textBoxBackgroundColourId,
+        juce::Colours::transparentBlack);
     inputGainSlider.setColour(juce::Slider::thumbColourId, juce::Colours::white);
     inputGainSlider.setColour(juce::Slider::trackColourId, juce::Colours::green);
     inputGainSlider.setTextValueSuffix(" dB");
@@ -207,6 +221,12 @@ AudioPluginAudioProcessorEditor::~AudioPluginAudioProcessorEditor()
 //==============================================================================
 void AudioPluginAudioProcessorEditor::paint(juce::Graphics& g)
 {
+    // Variablen
+    const float minFreq = 20.0f;
+    const float maxFreq = 20000.0f;
+    const float displayMinDb = DisplayScale::minDb;
+    const float displayMaxDb = DisplayScale::maxDb;
+
     // Topbar Farbe
     g.setColour(juce::Colour::fromString("ff2c2f33"));
     g.fillRect(topBarArea);
@@ -233,29 +253,86 @@ void AudioPluginAudioProcessorEditor::paint(juce::Graphics& g)
     g.setColour(juce::Colours::hotpink);
     g.fillRect(spectrumInnerArea);
 
-    // Vertikale Frequenzlinien im Spektrogramm zeichnen
-    g.setColour(juce::Colours::white.withAlpha(0.5f));
-
-    // Define these constants at function scope
-    const float minFreq = 20.0f;
-    const float maxFreq = 20000.0f;
-    const float displayMinDb = DisplayScale::minDb;
-    const float displayMaxDb = DisplayScale::maxDb;
-
-    // SPEKTRUM NUR ZEICHNEN WENN EQ KURVE AUS IST
-    if (!showEQCurve)
+    //Spektrum im pinken Bereich zeichnen
     {
-        drawFrame(g);
+        juce::Graphics::ScopedSaveState save(g);
+        g.reduceClipRegion(spectrumInnerArea);
+
+        // SPEKTRUM NUR ZEICHNEN WENN EQ KURVE AUS IST
+        if (!showEQCurve)
+        {
+            drawFrame(g);
+        }
+        else
+        {
+            drawEQCurve(g);
+        }
+
+        // Referenzbänder zeichnen
+        if (!showEQCurve && !referenceBands.empty())
+        {
+            // Pfade für die Linienpunkte
+            juce::Path pathP10;
+            juce::Path pathP90;
+            juce::Path pathMedian;
+
+            // Überprüfen, ob aktueller Punkt der erste ist
+            bool firstPoint = true;
+
+            // Schleife für alle Bänder
+            for (const auto& band : referenceBands)
+            {
+                // x-Position normieren
+                float normX = juce::mapFromLog10(band.freq, minFreq, maxFreq);
+
+                // x-Position auf Fenster skalieren
+                float x = spectrumInnerArea.getX() + normX * spectrumInnerArea.getWidth();
+
+                // y-Positionen invertieren (oben = laut)
+                float yP10 = juce::jmap(band.p10, displayMinDb, displayMaxDb,
+                    (float)spectrumInnerArea.getBottom(),
+                    (float)spectrumInnerArea.getY());
+
+                float yMedian = juce::jmap(band.median, displayMinDb, displayMaxDb,
+                    (float)spectrumInnerArea.getBottom(),
+                    (float)spectrumInnerArea.getY());
+
+                float yP90 = juce::jmap(band.p90, displayMinDb, displayMaxDb,
+                    (float)spectrumInnerArea.getBottom(),
+                    (float)spectrumInnerArea.getY());
+
+                // Neue Linie beim ersten Punkt der JSON Datei
+                if (firstPoint)
+                {
+                    pathP10.startNewSubPath(x, yP10);
+                    pathP90.startNewSubPath(x, yP90);
+                    pathMedian.startNewSubPath(x, yMedian);
+                    firstPoint = false;
+                }
+                // Sonst Linie verbinden
+                else
+                {
+                    pathP10.lineTo(x, yP10);
+                    pathP90.lineTo(x, yP90);
+                    pathMedian.lineTo(x, yMedian);
+                }
+            }
+
+            // Zeichnen der Referenzlinien
+            g.setColour(juce::Colours::blue.withAlpha(0.6f)); // untere (p10)
+            g.strokePath(pathP10, juce::PathStrokeType(1.5f));
+
+            g.setColour(juce::Colours::blue.withAlpha(0.6f)); // obere (p90)
+            g.strokePath(pathP90, juce::PathStrokeType(1.5f));
+
+            g.setColour(juce::Colours::grey); // Median
+            g.strokePath(pathMedian, juce::PathStrokeType(2.0f));
+        }
     }
 
-    // EQ KURVE DARÜBER ZEICHNEN WENN AKTIV
-    if (showEQCurve)
-    {
-        drawEQCurve(g);
-    }
-
-    // Schriftgröße für Achsenbeschriftung
+    // Schriftgröße und Farbe für Achsenbeschriftung
     g.setFont(15.0f);
+    g.setColour(juce::Colours::white.withAlpha(0.5f));
 
     // Y-Position für Achsenbeschriftung
     float textY = (float)spectrumDisplayArea.getBottom() + 3.0f;
@@ -297,69 +374,6 @@ void AudioPluginAudioProcessorEditor::paint(juce::Graphics& g)
 
     float textX = (float)spectrumInnerArea.getX() - 40.0f;
     g.setColour(juce::Colours::lightgrey.withAlpha(0.5f));
-
-    // Referenzbänder zeichnen
-    if (!showEQCurve && !referenceBands.empty())
-    {
-        // Remove redefinitions - use variables defined above
-
-        // Pfade für die Linienpunkte
-        juce::Path pathP10;
-        juce::Path pathP90;
-        juce::Path pathMedian;
-
-        // Überprüfen, ob aktueller Punkt der erste ist
-        bool firstPoint = true;
-
-        // Schleife für alle Bänder
-        for (const auto& band : referenceBands)
-        {
-            // x-Position normieren
-            float normX = juce::mapFromLog10(band.freq, minFreq, maxFreq);
-
-            // x-Position auf Fenster skalieren
-            float x = spectrumInnerArea.getX() + normX * spectrumInnerArea.getWidth();
-
-            // y-Positionen invertieren (oben = laut)
-            float yP10 = juce::jmap(band.p10, displayMinDb, displayMaxDb,
-                (float)spectrumInnerArea.getBottom(),
-                (float)spectrumInnerArea.getY());
-
-            float yMedian = juce::jmap(band.median, displayMinDb, displayMaxDb,
-                (float)spectrumInnerArea.getBottom(),
-                (float)spectrumInnerArea.getY());
-
-            float yP90 = juce::jmap(band.p90, displayMinDb, displayMaxDb,
-                (float)spectrumInnerArea.getBottom(),
-                (float)spectrumInnerArea.getY());
-
-            // Neue Linie beim ersten Punkt der JSON Datei
-            if (firstPoint)
-            {
-                pathP10.startNewSubPath(x, yP10);
-                pathP90.startNewSubPath(x, yP90);
-                pathMedian.startNewSubPath(x, yMedian);
-                firstPoint = false;
-            }
-            // Sonst Linie verbinden
-            else
-            {
-                pathP10.lineTo(x, yP10);
-                pathP90.lineTo(x, yP90);
-                pathMedian.lineTo(x, yMedian);
-            }
-        }
-
-        // Zeichnen der Referenzlinien
-        g.setColour(juce::Colours::blue.withAlpha(0.6f)); // untere (p10)
-        g.strokePath(pathP10, juce::PathStrokeType(1.5f));
-
-        g.setColour(juce::Colours::blue.withAlpha(0.6f)); // obere (p90)
-        g.strokePath(pathP90, juce::PathStrokeType(1.5f));
-
-        g.setColour(juce::Colours::grey); // Median
-        g.strokePath(pathMedian, juce::PathStrokeType(2.0f));
-    }
 
     // EQ Sliderbereich (blau)
     g.setColour(juce::Colours::blue);
@@ -435,7 +449,7 @@ void AudioPluginAudioProcessorEditor::resized()
     genreErkennenButton.setBounds(10, 5, 200, 30);
     resetButton.setBounds(940, 5, 50, 30);
 
-    eqCurveToggleButton.setBounds(220, 5, 120, 30);
+    eqCurveToggleButton.setBounds(220, 5, 150, 30);
 
     // Restbereich unter der Topbar
     auto rest = area;
