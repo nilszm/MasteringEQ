@@ -3,8 +3,8 @@
 
 
 //==============================================================================
-AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAudioProcessor& p)
-    : AudioProcessorEditor (&p), processorRef (p)
+AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor(AudioPluginAudioProcessor& p)
+    : AudioProcessorEditor(&p), processorRef(p)
 {
     // Start
     showEQCurve = false;
@@ -15,7 +15,7 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
     // Fenster Einstellungen, x-Breite, y-Höhe
     setSize(1000, 690);
     setResizable(false, false);
-    
+
     // Dropdown-Menue
     genreBox.setTextWhenNothingSelected("Genre auswahlen...");
     genreBox.addItem("Pop", 1);
@@ -105,7 +105,7 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
         eqSlider[i].setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
         eqSlider[i].setColour(juce::Slider::thumbColourId, juce::Colours::white);
         eqSlider[i].setColour(juce::Slider::trackColourId, juce::Colours::lightgrey);
-        
+
         eqAttachments[i] = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
             processorRef.apvts, "band" + juce::String(i), eqSlider[i]);
 
@@ -173,17 +173,17 @@ void AudioPluginAudioProcessorEditor::loadReferenceCurve(const juce::String& fil
     juce::File refFileBase = juce::File::getSpecialLocation(
         juce::File::currentApplicationFile);
 
-        // Solange im Pfad nach oben gehen, bis "build"
-        for (int i = 0; i < 8; ++i)
-        {
-            if (refFileBase.getFileName().equalsIgnoreCase("build"))
-                break;
+    // Solange im Pfad nach oben gehen, bis "build"
+    for (int i = 0; i < 8; ++i)
+    {
+        if (refFileBase.getFileName().equalsIgnoreCase("build"))
+            break;
 
-            refFileBase = refFileBase.getParentDirectory();
-        }
+        refFileBase = refFileBase.getParentDirectory();
+    }
 
-        // Von der "build" Ebene aus laden
-        juce::File refFile = refFileBase
+    // Von der "build" Ebene aus laden
+    juce::File refFile = refFileBase
         .getChildFile("ReferenceCurves")
         .getChildFile(filename);
 
@@ -216,6 +216,41 @@ void AudioPluginAudioProcessorEditor::loadReferenceCurve(const juce::String& fil
 AudioPluginAudioProcessorEditor::~AudioPluginAudioProcessorEditor()
 {
 
+}
+
+//==============================================================================
+// Räumliches Smoothing für glatteres Spektrum
+std::vector<float> AudioPluginAudioProcessorEditor::applySpatialSmoothing(
+    const std::vector<float>& levels, int windowSize)
+{
+    if (levels.empty() || windowSize < 1)
+        return levels;
+
+    std::vector<float> smoothed(levels.size());
+    int halfWindow = windowSize / 2;
+
+    for (size_t i = 0; i < levels.size(); ++i)
+    {
+        float sum = 0.0f;
+        int count = 0;
+
+        // Moving average über benachbarte Werte
+        for (int j = -halfWindow; j <= halfWindow; ++j)
+        {
+            int idx = static_cast<int>(i) + j;
+
+            // Boundary handling: Werte außerhalb des Bereichs werden ignoriert
+            if (idx >= 0 && idx < static_cast<int>(levels.size()))
+            {
+                sum += levels[idx];
+                count++;
+            }
+        }
+
+        smoothed[i] = (count > 0) ? (sum / count) : levels[i];
+    }
+
+    return smoothed;
 }
 
 //==============================================================================
@@ -406,7 +441,7 @@ void AudioPluginAudioProcessorEditor::paint(juce::Graphics& g)
         {
             float valueInK = eqFrequencies[i] / 1000.0f;
 
-            if (valueInK  >= 10.0f)
+            if (valueInK >= 10.0f)
                 label = juce::String((int)valueInK) + "k";
             else
                 label = juce::String(valueInK, 1) + "k";
@@ -443,7 +478,7 @@ void AudioPluginAudioProcessorEditor::resized()
     genreBox.setBounds(710, 5, 220, 30);
 
     // Input Gain Slider - UNTER dem Dropdown
-    inputGainSlider.setBounds(770, 45, 220, 30); 
+    inputGainSlider.setBounds(770, 45, 220, 30);
 
     // Button Position (x-Position, y-Position, x-Breite, y-Höhe)
     genreErkennenButton.setBounds(10, 5, 200, 30);
@@ -528,7 +563,7 @@ void AudioPluginAudioProcessorEditor::resized()
         spectrumDisplayArea.getY(),
         innerWidth,
         spectrumDisplayArea.getHeight()
-    );   
+    );
 }
 
 // Timer callback Displayupdate
@@ -550,6 +585,17 @@ void AudioPluginAudioProcessorEditor::drawFrame(juce::Graphics& g)
     if (spectrum.empty())
         return;
 
+    // Smoothed levels initialisieren falls nötig
+    if (smoothedLevels.size() != spectrum.size())
+    {
+        smoothedLevels.resize(spectrum.size());
+        // Initialisierung mit aktuellen Werten
+        for (size_t i = 0; i < spectrum.size(); ++i)
+        {
+            smoothedLevels[i] = spectrum[i].level;
+        }
+    }
+
     auto area = spectrumInnerArea.toFloat();
 
     const float displayMinDb = DisplayScale::minDb;
@@ -560,7 +606,6 @@ void AudioPluginAudioProcessorEditor::drawFrame(juce::Graphics& g)
     const float logMin = std::log10(minFreq);
     const float logMax = std::log10(maxFreq);
 
-    // Direkt die Punkte ohne Smoothing sammeln
     std::vector<juce::Point<float>> validPoints;
 
     for (size_t i = 0; i < spectrum.size(); ++i)
@@ -569,8 +614,11 @@ void AudioPluginAudioProcessorEditor::drawFrame(juce::Graphics& g)
         if (point.frequency < minFreq || point.frequency > maxFreq)
             continue;
 
-        // Direkt den rohen Level verwenden - kein Smoothing
-        float level = point.level;
+        // EXPONENTIAL SMOOTHING (Ableton Standard)
+        smoothedLevels[i] = smoothedLevels[i] * smoothingFactor +
+            point.level * (1.0f - smoothingFactor);
+
+        float level = smoothedLevels[i];
 
         float logFreq = std::log10(point.frequency);
         float x = area.getX() + juce::jmap(logFreq, logMin, logMax, 0.0f, 1.0f) * area.getWidth();
@@ -580,15 +628,29 @@ void AudioPluginAudioProcessorEditor::drawFrame(juce::Graphics& g)
         validPoints.push_back({ x, y });
     }
 
-    // Extrapolation zu 20 Hz (optional beibehalten)
+    // RÄUMLICHES SMOOTHING ANWENDEN
+    // Extrahiere nur die Y-Werte (dB levels)
+    std::vector<float> yValues;
+    yValues.reserve(validPoints.size());
+    for (const auto& point : validPoints)
+        yValues.push_back(point.getY());
+
+    // Smoothing anwenden (windowSize = 5 für glattere Kurve, 3 für weniger smoothing)
+    auto smoothedY = applySpatialSmoothing(yValues, 5);
+
+    // Punkte mit geglätteten Y-Werten aktualisieren
+    for (size_t i = 0; i < validPoints.size() && i < smoothedY.size(); ++i)
+        validPoints[i].setY(smoothedY[i]);
+
+    // Extrapolation zu 20 Hz
     if (!validPoints.empty() && spectrum[0].frequency > minFreq)
     {
         if (validPoints.size() >= 2)
         {
             float freq1 = spectrum[0].frequency;
             float freq2 = spectrum[1].frequency;
-            float level1 = spectrum[0].level;
-            float level2 = spectrum[1].level;
+            float level1 = smoothedLevels[0];
+            float level2 = smoothedLevels[1];
 
             float slope = (level2 - level1) / (freq2 - freq1);
             float extrapolatedLevel = level1 + slope * (minFreq - freq1);
@@ -605,7 +667,6 @@ void AudioPluginAudioProcessorEditor::drawFrame(juce::Graphics& g)
     if (validPoints.size() < 2)
         return;
 
-    // Einfacher Path ohne Interpolation - direkte Linien zwischen Punkten
     juce::Path spectrumPath;
     spectrumPath.startNewSubPath(validPoints[0]);
 
@@ -655,7 +716,7 @@ void AudioPluginAudioProcessorEditor::drawEQCurve(juce::Graphics& g)
     {
         float f0 = eqFrequencies[bandIdx];
         float gainDb = eqSlider[bandIdx].getValue();
-        float Q = eqKnob[bandIdx].getValue();
+        float Q = eqKnob[bandIdx].getValue(); // Q-Wert vom Knob verwenden
 
         if (std::abs(gainDb) > 0.01f)
         {

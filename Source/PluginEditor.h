@@ -124,6 +124,13 @@ private:
     std::complex<float> peakingEQComplex(float freq, float f0, float Q, float gainDb, float sampleRate);
     void drawEQCurve(juce::Graphics& g);
 
+    // Für Spektrum Smoothing (Ableton Standard)
+    std::vector<float> smoothedLevels;
+    static constexpr float smoothingFactor = 0.8f; // Ableton Standard Avg
+
+    // Räumliches Smoothing für glatteres Spektrum
+    std::vector<float> applySpatialSmoothing(const std::vector<float>& levels, int windowSize = 3);
+
     // Layout Konstanten
     static constexpr int topBarHeight = 40; // Höhe der Topbar für Buttons und Dropdown
     static constexpr int spectrogramOuterHeight = 430;
