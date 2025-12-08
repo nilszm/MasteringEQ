@@ -63,14 +63,20 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
 
     //==============================================================================
-    // Zugriff auf Spektrum-Daten
+    // Zugriff auf Spektrum-Daten (Post-EQ für Anzeige)
     void getNextScopeData(float* destBuffer, int numPoints);
-    void pushNextSampleIntoFifo(float sample) noexcept;       // Sample in FIFO speichern
-    void updateSpectrumArray(double sampleRate);             // FFT durchführen und Spektrum berechnen
+    void pushNextSampleIntoFifo(float sample) noexcept;       // Sample in FIFO speichern (Post-EQ)
+    void updateSpectrumArray(double sampleRate);              // FFT durchführen und Spektrum berechnen
     bool getNextFFTBlockReady() const { return nextFFTBlockReady; }
     const float* getScopeData() const { return scopeData; }
     int getScopeSize() const { return scopeSize; }
     void setNextFFTBlockReady(bool ready) { nextFFTBlockReady = ready; }
+
+    // Pre-EQ Spektrum für Messung
+    void pushNextSampleIntoPreEQFifo(float sample) noexcept;  // Sample in Pre-EQ FIFO speichern
+    void updatePreEQSpectrumArray(double sampleRate);         // Pre-EQ FFT berechnen
+    bool getNextPreEQFFTBlockReady() const { return nextPreEQFFTBlockReady; }
+    void setNextPreEQFFTBlockReady(bool ready) { nextPreEQFFTBlockReady = ready; }
 
     // Spektrum-Punktstruktur
     struct SpectrumPoint
@@ -79,7 +85,28 @@ public:
         float level;     // Level (dB)
     };
 
-    std::vector<SpectrumPoint> spectrumArray; // Vektor für Spektrum-Daten
+    std::vector<SpectrumPoint> spectrumArray;      // Post-EQ Spektrum für Anzeige
+    std::vector<SpectrumPoint> preEQSpectrumArray; // Pre-EQ Spektrum für Messung
+
+    //==============================================================================
+    // Referenzkurven-Struktur
+    struct ReferenceBand
+    {
+        float freq;   // Frequenz in Hz
+        float p10;    // Unteres 10%-Perzentil
+        float median; // Median (Zentralwert)
+        float p90;    // Oberes 90%-Perzentil
+    };
+
+    //==============================================================================
+    // Persistente Daten für Referenz- und Differenzkurve
+    std::vector<ReferenceBand> referenceBands;           // Referenzkurve
+    std::array<float, 31> targetCorrections;             // Berechnete Korrekturen
+    bool hasTargetCorrections = false;                   // Flag ob Differenzkurve vorhanden
+    int selectedGenreId = 0;                             // Ausgewähltes Genre im Dropdown
+
+    // Referenzkurve laden
+    void loadReferenceCurve(const juce::String& filename);
 
     //==============================================================================
     // Parameterverwaltung
@@ -87,6 +114,18 @@ public:
     void updateFilters(); // Aktualisiert alle Bandfilter mit aktuellen Parametern
 
     void resetAllBandsToDefault();
+
+    //==============================================================================
+    // Messung / Spektrum-Aufnahme
+    void startMeasurement();
+    void stopMeasurement();
+    void addMeasurementSnapshot();
+    bool isMeasuring() const { return measuring; }
+
+    // Gespeicherte Spektrum-Daten abrufen
+    const std::vector<std::vector<SpectrumPoint>>& getMeasurementBuffer() const { return measurementBuffer; }
+    std::vector<SpectrumPoint> getAveragedSpectrum() const;
+    void clearMeasurement();
 
 private:
     //==============================================================================
@@ -99,7 +138,10 @@ private:
     std::array<Filter, numBands> leftFilters;   // Linker Kanal
     std::array<Filter, numBands> rightFilters;  // Rechter Kanal
 
-    
+    //==============================================================================
+    // Messungs-Speicher
+    std::vector<std::vector<SpectrumPoint>> measurementBuffer;  // Alle Snapshots während Messung
+    bool measuring = false;                                      // Flag ob Messung aktiv ist
 
     // Festgelegte Filterfrequenzen für 31 Bänder
     const std::array<float, numBands> filterFrequencies = {
@@ -111,7 +153,7 @@ private:
     };
 
     //==============================================================================
-    // FFT / Spectrum Analyzer
+    // FFT / Spectrum Analyzer (Post-EQ für Anzeige)
     enum {
         fftOrder = 12,
         fftSize = 1 << fftOrder,
@@ -119,12 +161,21 @@ private:
     };
 
     juce::dsp::FFT forwardFFT;                        // FFT-Berechnung
-    juce::dsp::WindowingFunction<float> window;      // Fensterfunktion (Hann)
-    float fifo[fftSize];                              // FIFO für FFT-Eingang
+    juce::dsp::WindowingFunction<float> window;       // Fensterfunktion (Hann)
+    float fifo[fftSize];                              // FIFO für FFT-Eingang (Post-EQ)
     float fftData[2 * fftSize];                       // FFT-Datenpuffer
     int fifoIndex = 0;                                // Index für FIFO
-    bool nextFFTBlockReady = false;                  // Flag für neue FFT-Daten
+    bool nextFFTBlockReady = false;                   // Flag für neue FFT-Daten
     float scopeData[scopeSize];                       // Normiertes Spektrum für Anzeige
+
+    //==============================================================================
+    // FFT / Spectrum Analyzer (Pre-EQ für Messung)
+    juce::dsp::FFT preEQForwardFFT;                   // FFT-Berechnung für Pre-EQ
+    juce::dsp::WindowingFunction<float> preEQWindow;  // Fensterfunktion für Pre-EQ
+    float preEQFifo[fftSize];                         // FIFO für FFT-Eingang (Pre-EQ)
+    float preEQFftData[2 * fftSize];                  // FFT-Datenpuffer für Pre-EQ
+    int preEQFifoIndex = 0;                           // Index für Pre-EQ FIFO
+    bool nextPreEQFFTBlockReady = false;              // Flag für neue Pre-EQ FFT-Daten
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioPluginAudioProcessor)
 };

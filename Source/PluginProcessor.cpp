@@ -14,9 +14,17 @@ AudioPluginAudioProcessor::AudioPluginAudioProcessor()
 #endif
     ),
     apvts(*this, nullptr, "Parameters", createParameterLayout()),
-    forwardFFT(fftOrder), window(fftSize,
-        juce::dsp::WindowingFunction<float>::hann)
+    forwardFFT(fftOrder),
+    window(fftSize, juce::dsp::WindowingFunction<float>::hann),
+    preEQForwardFFT(fftOrder),
+    preEQWindow(fftSize, juce::dsp::WindowingFunction<float>::hann)
 {
+    // Pre-EQ Puffer initialisieren
+    juce::zeromem(preEQFifo, sizeof(preEQFifo));
+    juce::zeromem(preEQFftData, sizeof(preEQFftData));
+
+    // Target Corrections initialisieren
+    targetCorrections.fill(0.0f);
 }
 
 //==============================================================================
@@ -27,6 +35,8 @@ AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
     juce::zeromem(fifo, sizeof(fifo));
     juce::zeromem(fftData, sizeof(fftData));
     juce::zeromem(scopeData, sizeof(scopeData));
+    juce::zeromem(preEQFifo, sizeof(preEQFifo));
+    juce::zeromem(preEQFftData, sizeof(preEQFftData));
 }
 
 //==============================================================================
@@ -114,15 +124,15 @@ AudioPluginAudioProcessor::createParameterLayout()
     ));
 
     // 31 Q - Parameter(Filtergüte)
-        for (int i = 0; i < numBands; ++i)
-        {
-            layout.add(std::make_unique<juce::AudioParameterFloat>(
-                "bandQ" + juce::String(i),
-                "Band Q " + juce::String(i),
-                juce::NormalisableRange<float>(0.3f, 10.0f, 0.01f),
-                4.32f // Default
-            ));
-        }
+    for (int i = 0; i < numBands; ++i)
+    {
+        layout.add(std::make_unique<juce::AudioParameterFloat>(
+            "bandQ" + juce::String(i),
+            "Band Q " + juce::String(i),
+            juce::NormalisableRange<float>(0.3f, 10.0f, 0.01f),
+            4.32f // Default
+        ));
+    }
 
     // Die 31 EQ Bänder
     for (int i = 0; i < numBands; ++i)
@@ -247,6 +257,7 @@ bool AudioPluginAudioProcessor::isBusesLayoutSupported(const BusesLayout& layout
 // Audio-Block verarbeiten
 void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
+    juce::ignoreUnused(midiMessages);
     updateFilters(); // Sicherstellen, dass Filter auf aktuelle Parameter reagieren
     juce::ScopedNoDenormals noDenormals;
 
@@ -254,9 +265,6 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
     auto totalNumOutputChannels = getTotalNumOutputChannels();
 
     // Nur überschüssige Output-Kanäle clearen (z.B. bei Surround)
-    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear(i, 0, buffer.getNumSamples());
-
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear(i, 0, buffer.getNumSamples());
 
@@ -273,7 +281,37 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
         }
     }
 
-    // Alle Input-Kanäle filtern
+    //==========================================================================
+    // PRE-EQ FFT: Samples VOR den Filtern erfassen (für Messung)
+    //==========================================================================
+    {
+        auto numSamples = buffer.getNumSamples();
+        auto numChannels = getTotalNumInputChannels();
+
+        if (numChannels >= 2)
+        {
+            // Stereo: Links und Rechts mitteln für echte Mono-Summe
+            auto* leftData = buffer.getReadPointer(0);
+            auto* rightData = buffer.getReadPointer(1);
+
+            for (auto i = 0; i < numSamples; ++i)
+            {
+                float monoSample = (leftData[i] + rightData[i]) * 0.5f;
+                pushNextSampleIntoPreEQFifo(monoSample);
+            }
+        }
+        else if (numChannels == 1)
+        {
+            // Mono-Input: direkt verwenden
+            auto* channelData = buffer.getReadPointer(0);
+            for (auto i = 0; i < numSamples; ++i)
+                pushNextSampleIntoPreEQFifo(channelData[i]);
+        }
+    }
+
+    //==========================================================================
+    // EQ-Filter anwenden
+    //==========================================================================
     for (int channel = 0; channel < totalNumInputChannels; ++channel)
     {
         auto* channelData = buffer.getWritePointer(channel);
@@ -290,19 +328,38 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
         }
     }
 
-    // FFT vorbereiten (nur erster Kanal)
-    if (getTotalNumInputChannels() > 0)
+    //==========================================================================
+// POST-EQ FFT: Samples NACH den Filtern erfassen (für Anzeige)
+// Mono-Summe aus beiden Kanälen (L+R gemittelt)
+//==========================================================================
     {
-        auto* channelData = buffer.getReadPointer(0);
         auto numSamples = buffer.getNumSamples();
+        auto numChannels = getTotalNumInputChannels();
 
-        for (auto i = 0; i < numSamples; ++i)
-            pushNextSampleIntoFifo(channelData[i]);
+        if (numChannels >= 2)
+        {
+            // Stereo: Links und Rechts mitteln für echte Mono-Summe
+            auto* leftData = buffer.getReadPointer(0);
+            auto* rightData = buffer.getReadPointer(1);
+
+            for (auto i = 0; i < numSamples; ++i)
+            {
+                float monoSample = (leftData[i] + rightData[i]) * 0.5f;
+                pushNextSampleIntoFifo(monoSample);
+            }
+        }
+        else if (numChannels == 1)
+        {
+            // Mono-Input: direkt verwenden
+            auto* channelData = buffer.getReadPointer(0);
+            for (auto i = 0; i < numSamples; ++i)
+                pushNextSampleIntoFifo(channelData[i]);
+        }
     }
 }
 
 //==============================================================================
-// Samples in FIFO speichern
+// Samples in Post-EQ FIFO speichern
 // FIFO wird gefüllt, bis FFT durchgeführt werden kann
 void AudioPluginAudioProcessor::pushNextSampleIntoFifo(float sample) noexcept
 {
@@ -321,17 +378,31 @@ void AudioPluginAudioProcessor::pushNextSampleIntoFifo(float sample) noexcept
 }
 
 //==============================================================================
-// Spectrum Array aktualisieren
+// Samples in Pre-EQ FIFO speichern (für Messung)
+void AudioPluginAudioProcessor::pushNextSampleIntoPreEQFifo(float sample) noexcept
+{
+    if (preEQFifoIndex == fftSize)
+    {
+        if (!nextPreEQFFTBlockReady)
+        {
+            juce::zeromem(preEQFftData, sizeof(preEQFftData));
+            memcpy(preEQFftData, preEQFifo, sizeof(preEQFifo));
+            nextPreEQFFTBlockReady = true; // Signalisiert, dass Pre-EQ FFT-Daten bereit sind
+        }
+        preEQFifoIndex = 0;
+    }
+
+    preEQFifo[preEQFifoIndex++] = sample;
+}
+
+//==============================================================================
+// Post-EQ Spectrum Array aktualisieren (für Anzeige)
 // Berechnet FFT, wendet Windowing an und erstellt normalisiertes Spektrum
 void AudioPluginAudioProcessor::updateSpectrumArray(double sampleRate)
 {
     // Fensterung
     window.multiplyWithWindowingTable(fftData, fftSize);
     forwardFFT.performFrequencyOnlyForwardTransform(fftData);
-
-    // Anzeigebereich für FFT und JSON Referenz
-    const float displayMinDb = -20.0f;
-    const float displayMaxDb = 80.0f;
 
     spectrumArray.clear();
     spectrumArray.reserve(scopeSize);
@@ -402,6 +473,81 @@ void AudioPluginAudioProcessor::updateSpectrumArray(double sampleRate)
 }
 
 //==============================================================================
+// Pre-EQ Spectrum Array aktualisieren (für Messung)
+void AudioPluginAudioProcessor::updatePreEQSpectrumArray(double sampleRate)
+{
+    // Fensterung
+    preEQWindow.multiplyWithWindowingTable(preEQFftData, fftSize);
+    preEQForwardFFT.performFrequencyOnlyForwardTransform(preEQFftData);
+
+    preEQSpectrumArray.clear();
+    preEQSpectrumArray.reserve(scopeSize);
+
+    // Terzband-Mittenfrequenzen (nach IEC 61260)
+    std::vector<float> thirdOctaveCenterFreqs = {
+        25.0f, 31.5f, 40.0f, 50.0f, 63.0f, 80.0f, 100.0f, 125.0f, 160.0f, 200.0f,
+        250.0f, 315.0f, 400.0f, 500.0f, 630.0f, 800.0f, 1000.0f, 1250.0f, 1600.0f, 2000.0f,
+        2500.0f, 3150.0f, 4000.0f, 5000.0f, 6300.0f, 8000.0f, 10000.0f, 12500.0f, 16000.0f, 20000.0f
+    };
+
+    // Amplituden normieren
+    const float fftNorm = (float)fftSize;
+    const float binWidth = sampleRate / (float)fftSize;
+
+    for (float centerFreq : thirdOctaveCenterFreqs)
+    {
+        // Bandgrenzen berechnen (Faktor 2^(1/6) ≈ 1.122 für Terz)
+        const float bandwidthFactor = std::pow(2.0f, 1.0f / 6.0f);
+        float lowerFreq = centerFreq / bandwidthFactor;
+        float upperFreq = centerFreq * bandwidthFactor;
+
+        // Nur Bänder innerhalb der Nyquist-Frequenz
+        if (lowerFreq >= sampleRate / 2.0f)
+            break;
+
+        upperFreq = std::min(upperFreq, (float)(sampleRate / 2.0f));
+
+        // FFT-Bins für dieses Band finden
+        int lowerBin = (int)std::floor(lowerFreq / binWidth);
+        int upperBin = (int)std::ceil(upperFreq / binWidth);
+
+        lowerBin = juce::jlimit(0, fftSize / 2, lowerBin);
+        upperBin = juce::jlimit(0, fftSize / 2, upperBin);
+
+        // Energie über alle Bins im Band summieren
+        float bandEnergy = 0.0f;
+        int binCount = 0;
+
+        for (int bin = lowerBin; bin <= upperBin; ++bin)
+        {
+            float mag = preEQFftData[bin] / fftNorm;
+            bandEnergy += mag * mag;
+            binCount++;
+        }
+
+        // Mittlere Energie und zurück zu Amplitude
+        if (binCount > 0)
+            bandEnergy /= binCount;
+
+        float bandMagnitude = std::sqrt(bandEnergy);
+
+        // Schutz vor log(0)
+        if (bandMagnitude <= 0.0f)
+            bandMagnitude = 1.0e-9f;
+
+        // In dB umrechnen
+        float dbFs = juce::Decibels::gainToDecibels(bandMagnitude);
+        float displayDb = dbFs + DisplayScale::offsetDb;
+
+        // Auf Ausgangsbereich begrenzen
+        displayDb = juce::jlimit(DisplayScale::minDb, DisplayScale::maxDb, displayDb);
+
+        // Speichern
+        preEQSpectrumArray.push_back({ centerFreq, displayDb });
+    }
+}
+
+//==============================================================================
 // Editor
 bool AudioPluginAudioProcessor::hasEditor() const
 {
@@ -430,4 +576,142 @@ void AudioPluginAudioProcessor::setStateInformation(const void* data, int sizeIn
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new AudioPluginAudioProcessor();
+}
+
+//==============================================================================
+// Messung starten
+void AudioPluginAudioProcessor::startMeasurement()
+{
+    measurementBuffer.clear();
+    measuring = true;
+    DBG("Messung gestartet");
+}
+
+//==============================================================================
+// Messung stoppen
+void AudioPluginAudioProcessor::stopMeasurement()
+{
+    measuring = false;
+    DBG("Messung gestoppt - " + juce::String(measurementBuffer.size()) + " Snapshots gesammelt");
+}
+
+//==============================================================================
+// Snapshot hinzufügen (wird vom Timer aufgerufen)
+// WICHTIG: Verwendet jetzt preEQSpectrumArray statt spectrumArray!
+void AudioPluginAudioProcessor::addMeasurementSnapshot()
+{
+    if (measuring && !preEQSpectrumArray.empty())
+    {
+        measurementBuffer.push_back(preEQSpectrumArray);
+    }
+}
+
+//==============================================================================
+// Messung löschen
+void AudioPluginAudioProcessor::clearMeasurement()
+{
+    measurementBuffer.clear();
+    measuring = false;
+}
+
+//==============================================================================
+// Gemitteltes Spektrum berechnen
+std::vector<AudioPluginAudioProcessor::SpectrumPoint>
+AudioPluginAudioProcessor::getAveragedSpectrum() const
+{
+    std::vector<SpectrumPoint> averaged;
+
+    if (measurementBuffer.empty())
+        return averaged;
+
+    size_t numBands = measurementBuffer[0].size();
+    size_t numSnapshots = measurementBuffer.size();
+
+    averaged.resize(numBands);
+
+    for (size_t band = 0; band < numBands; ++band)
+    {
+        float levelSum = 0.0f;
+        int validCount = 0;
+
+        for (const auto& snapshot : measurementBuffer)
+        {
+            if (band < snapshot.size())
+            {
+                levelSum += snapshot[band].level;
+                validCount++;
+            }
+        }
+
+        // Frequenz aus erstem Snapshot übernehmen (ist konstant)
+        averaged[band].frequency = measurementBuffer[0][band].frequency;
+
+        // Mittelwert berechnen
+        if (validCount > 0)
+            averaged[band].level = levelSum / static_cast<float>(validCount);
+        else
+            averaged[band].level = DisplayScale::minDb;
+    }
+
+    return averaged;
+}
+
+//==============================================================================
+// Referenzkurve laden
+void AudioPluginAudioProcessor::loadReferenceCurve(const juce::String& filename)
+{
+    // Speicher für Kurve leeren
+    referenceBands.clear();
+
+    if (filename.isEmpty())
+        return;
+
+    // File laden
+    juce::File refFileBase = juce::File::getSpecialLocation(
+        juce::File::currentApplicationFile);
+
+    // Solange im Pfad nach oben gehen, bis "build"
+    for (int i = 0; i < 8; ++i)
+    {
+        if (refFileBase.getFileName().equalsIgnoreCase("build"))
+            break;
+
+        refFileBase = refFileBase.getParentDirectory();
+    }
+
+    // Von der "build" Ebene aus laden
+    juce::File refFile = refFileBase
+        .getChildFile("ReferenceCurves")
+        .getChildFile(filename);
+
+    // Inhalt von JSON in String laden
+    juce::String fileContent = refFile.loadFileAsString();
+
+    if (fileContent.isEmpty())
+    {
+        DBG("Konnte Referenzkurve nicht laden: " + filename);
+        return;
+    }
+
+    // Analysiert Text aus fileContent und erstellt dynamisches var
+    juce::var jsonData = juce::JSON::parse(fileContent);
+
+    // Bänder aus JSON erstellen
+    auto bands = jsonData["bands"];
+
+    if (bands.isArray())
+    {
+        for (auto& b : *bands.getArray())
+        {
+            ReferenceBand rb;
+            rb.freq = (float)b["freq"];
+            rb.p10 = (float)b["p10"];
+            rb.median = (float)b["median"];
+            rb.p90 = (float)b["p90"];
+
+            referenceBands.push_back(rb);
+        }
+    }
+
+    DBG("Referenzkurve geladen: " + filename + " (" + juce::String(referenceBands.size()) + " Bänder)");
 }

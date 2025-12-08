@@ -1,6 +1,6 @@
 ﻿#include "PluginProcessor.h"
 #include "PluginEditor.h"
-
+#include <limits>
 
 //==============================================================================
 AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor(AudioPluginAudioProcessor& p)
@@ -10,7 +10,7 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor(AudioPluginAudi
     showEQCurve = false;
 
     // Timer für FFT erzeugen
-    startTimerHz(30);  // Update display at 30 FPS
+    startTimerHz(30);
 
     // Fenster Einstellungen, x-Breite, y-Höhe
     setSize(1000, 690);
@@ -29,46 +29,79 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor(AudioPluginAudi
     genreBox.onChange = [this]
         {
             const int id = genreBox.getSelectedId();
+            processorRef.selectedGenreId = id;  // Genre-ID im Processor speichern
 
             switch (id)
             {
             case 1: // Pop
-                loadReferenceCurve("pop_medref.json");
+                processorRef.loadReferenceCurve("pop_medref.json");
                 break;
 
             case 2: // HipHop
-                loadReferenceCurve("HipHop.json");
+                processorRef.loadReferenceCurve("HipHop.json");
                 break;
 
             case 3: // Rock
-                loadReferenceCurve("Rock.json");
+                processorRef.loadReferenceCurve("Rock.json");
                 break;
 
             case 4: // EDM
-                loadReferenceCurve("EDM.json");
+                processorRef.loadReferenceCurve("EDM.json");
                 break;
 
             case 5: // Klassik
-                loadReferenceCurve("Klassik.json");
+                processorRef.loadReferenceCurve("Klassik.json");
                 break;
 
             case 6: // Test
-                loadReferenceCurve("test.json");
+                processorRef.loadReferenceCurve("test.json");
                 break;
 
             default:
-                // Wenn nichts ausgewählt ist oder "leer"
-                referenceBands.clear(); // Referenzkurve löschen
+                processorRef.referenceBands.clear();
                 break;
             }
 
-            // Nach jeder Änderung neu zeichnen
             repaint();
         };
 
-    // Button
-    genreErkennenButton.setButtonText("Messung starten / stoppen");
+    // Gespeichertes Genre wiederherstellen
+    if (processorRef.selectedGenreId > 0)
+    {
+        genreBox.setSelectedId(processorRef.selectedGenreId, juce::dontSendNotification);
+    }
+
+    // Button für Messung
+    genreErkennenButton.setButtonText("Messung starten");
     genreErkennenButton.setColour(juce::TextButton::buttonColourId, juce::Colours::grey);
+
+    genreErkennenButton.onClick = [this]
+        {
+            if (processorRef.isMeasuring())
+            {
+                // Messung stoppen
+                processorRef.stopMeasurement();
+                genreErkennenButton.setButtonText("Messung starten");
+                genreErkennenButton.setColour(juce::TextButton::buttonColourId, juce::Colours::grey);
+
+                // Auto-EQ anwenden wenn Referenzkurve vorhanden
+                if (!processorRef.referenceBands.empty())
+                {
+                    applyAutoEQ();
+                }
+                else
+                {
+                    DBG("Keine Referenzkurve ausgewählt!");
+                }
+            }
+            else
+            {
+                // Messung starten
+                processorRef.startMeasurement();
+                genreErkennenButton.setButtonText("Messung stoppen");
+                genreErkennenButton.setColour(juce::TextButton::buttonColourId, juce::Colours::green);
+            }
+        };
 
     resetButton.setButtonText("Reset");
     resetButton.setColour(juce::TextButton::buttonColourId, juce::Colours::red);
@@ -116,16 +149,14 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor(AudioPluginAudi
     for (int i = 0; i < 31; ++i)
     {
         eqKnob[i].setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-        eqKnob[i].setRange(0.3, 10.0, 0.01); // selbe Range wie Parameter
-        eqKnob[i].setValue(4.32); // Default Q
+        eqKnob[i].setRange(0.3, 10.0, 0.01);
+        eqKnob[i].setValue(4.32);
         eqKnob[i].setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
 
-        // Optik kannst du später verfeinern
         eqKnob[i].setColour(juce::Slider::thumbColourId, juce::Colours::white);
         eqKnob[i].setColour(juce::Slider::rotarySliderFillColourId, juce::Colours::darkgrey);
         eqKnob[i].setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colours::black);
 
-        // Attachment: dieser Knob steuert qBand<i>
         eqQAttachments[i] = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
             processorRef.apvts, "bandQ" + juce::String(i), eqKnob[i]);
 
@@ -138,10 +169,10 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor(AudioPluginAudi
     addAndMakeVisible(resetButton);
 
     // Input Gain Slider konfigurieren
-    inputGainSlider.setSliderStyle(juce::Slider::LinearHorizontal); // <-- GEÄNDERT
+    inputGainSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     inputGainSlider.setRange(-24.0, 24.0, 0.1);
     inputGainSlider.setValue(0.0);
-    inputGainSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20); // <-- GEÄNDERT
+    inputGainSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
     inputGainSlider.setColour(juce::Slider::textBoxOutlineColourId,
         juce::Colours::transparentBlack);
     inputGainSlider.setColour(juce::Slider::textBoxBackgroundColourId,
@@ -156,61 +187,11 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor(AudioPluginAudi
 
     // Label konfigurieren
     inputGainLabel.setText("Input Gain", juce::dontSendNotification);
-    inputGainLabel.setJustificationType(juce::Justification::centredLeft); // <-- GEÄNDERT
-    inputGainLabel.attachToComponent(&inputGainSlider, true); // <-- true = links vom Slider
+    inputGainLabel.setJustificationType(juce::Justification::centredLeft);
+    inputGainLabel.attachToComponent(&inputGainSlider, true);
 
     addAndMakeVisible(inputGainSlider);
     addAndMakeVisible(inputGainLabel);
-}
-
-// Referenzkurve laden
-void AudioPluginAudioProcessorEditor::loadReferenceCurve(const juce::String& filename)
-{
-    // Speicher für Kurve leeren
-    referenceBands.clear();
-
-    // File laden
-    juce::File refFileBase = juce::File::getSpecialLocation(
-        juce::File::currentApplicationFile);
-
-    // Solange im Pfad nach oben gehen, bis "build"
-    for (int i = 0; i < 8; ++i)
-    {
-        if (refFileBase.getFileName().equalsIgnoreCase("build"))
-            break;
-
-        refFileBase = refFileBase.getParentDirectory();
-    }
-
-    // Von der "build" Ebene aus laden
-    juce::File refFile = refFileBase
-        .getChildFile("ReferenceCurves")
-        .getChildFile(filename);
-
-    // Inhalt von JSON in String laden
-    juce::String fileContent = refFile.loadFileAsString();
-
-    // Analysiert Text aus fileContent und erstellt dynamisches var
-    juce::var jsonData = juce::JSON::parse(fileContent);
-
-    // Bänder aus JSON erstellen
-    auto bands = jsonData["bands"];
-
-    // Bänder erstellen
-    for (auto& b : *bands.getArray())
-    {
-        // Neues Datenobjekt
-        ReferenceBand rb;
-
-        // Bänder durchlaufen
-        rb.freq = (float)b["freq"];
-        rb.p10 = (float)b["p10"];
-        rb.median = (float)b["median"];
-        rb.p90 = (float)b["p90"];
-
-        // Band an Vektor anhängen
-        referenceBands.push_back(rb);
-    }
 }
 
 AudioPluginAudioProcessorEditor::~AudioPluginAudioProcessorEditor()
@@ -234,12 +215,10 @@ std::vector<float> AudioPluginAudioProcessorEditor::applySpatialSmoothing(
         float sum = 0.0f;
         int count = 0;
 
-        // Moving average über benachbarte Werte
         for (int j = -halfWindow; j <= halfWindow; ++j)
         {
             int idx = static_cast<int>(i) + j;
 
-            // Boundary handling: Werte außerhalb des Bereichs werden ignoriert
             if (idx >= 0 && idx < static_cast<int>(levels.size()))
             {
                 sum += levels[idx];
@@ -252,6 +231,7 @@ std::vector<float> AudioPluginAudioProcessorEditor::applySpatialSmoothing(
 
     return smoothed;
 }
+
 
 //==============================================================================
 void AudioPluginAudioProcessorEditor::paint(juce::Graphics& g)
@@ -304,7 +284,7 @@ void AudioPluginAudioProcessorEditor::paint(juce::Graphics& g)
         }
 
         // Referenzbänder zeichnen
-        if (!showEQCurve && !referenceBands.empty())
+        if (!showEQCurve && !processorRef.referenceBands.empty())
         {
             // Pfade für die Linienpunkte
             juce::Path pathP10;
@@ -315,7 +295,7 @@ void AudioPluginAudioProcessorEditor::paint(juce::Graphics& g)
             bool firstPoint = true;
 
             // Schleife für alle Bänder
-            for (const auto& band : referenceBands)
+            for (const auto& band : processorRef.referenceBands)
             {
                 // x-Position normieren
                 float normX = juce::mapFromLog10(band.freq, minFreq, maxFreq);
@@ -354,13 +334,13 @@ void AudioPluginAudioProcessorEditor::paint(juce::Graphics& g)
             }
 
             // Zeichnen der Referenzlinien
-            g.setColour(juce::Colours::blue.withAlpha(0.6f)); // untere (p10)
+            g.setColour(juce::Colours::blue.withAlpha(0.6f));
             g.strokePath(pathP10, juce::PathStrokeType(1.5f));
 
-            g.setColour(juce::Colours::blue.withAlpha(0.6f)); // obere (p90)
+            g.setColour(juce::Colours::blue.withAlpha(0.6f));
             g.strokePath(pathP90, juce::PathStrokeType(1.5f));
 
-            g.setColour(juce::Colours::grey); // Median
+            g.setColour(juce::Colours::grey);
             g.strokePath(pathMedian, juce::PathStrokeType(2.0f));
         }
     }
@@ -384,8 +364,8 @@ void AudioPluginAudioProcessorEditor::paint(juce::Graphics& g)
         // Vertikale Linie innerhalb des pinken Bereichs zeichnen
         g.drawVerticalLine(
             static_cast<int>(x),
-            (float)spectrumInnerArea.getY(), // obere Grenze
-            (float)spectrumInnerArea.getBottom() // untere Grenze
+            (float)spectrumInnerArea.getY(),
+            (float)spectrumInnerArea.getBottom()
         );
 
         // Achsenbeschriftung einfügen
@@ -398,12 +378,12 @@ void AudioPluginAudioProcessorEditor::paint(juce::Graphics& g)
         // Achsenbeschriftung einfügen
         g.drawFittedText(
             text,
-            (int)(x - 15), // x-Position: Nach links verschieben
-            (int)textY, // y-Position
-            30, // Textbox-Breite
-            15, // Textbox-Höhe
-            juce::Justification::centred, // zentrieren
-            1 // max. Anzahl an Zeilen
+            (int)(x - 15),
+            (int)textY,
+            30,
+            15,
+            juce::Justification::centred,
+            1
         );
     }
 
@@ -454,12 +434,12 @@ void AudioPluginAudioProcessorEditor::paint(juce::Graphics& g)
         // Text einfügen
         g.drawFittedText(
             label,
-            x - 20, // x-Position: Nach links verschieben
-            eqLabelArea.getY() + 5, // y-Position: Oberer Rand vom roten Bereich + kleiner Abstand
-            40, // Textbox-Breite
-            20, // Textbox-Höhe
-            juce::Justification::centred, // zentrieren
-            1 // max. Anzahl an Zeilen
+            x - 20,
+            eqLabelArea.getY() + 5,
+            40,
+            20,
+            juce::Justification::centred,
+            1
         );
     }
 }
@@ -541,7 +521,6 @@ void AudioPluginAudioProcessorEditor::resized()
 
         float bandWidth = (float)eqArea.getWidth() / 31.0f;
 
-        // z.B. 1.4x Bandbreite, aber nicht höher als der grüne Bereich
         int knobDiameter = (int)std::floor(bandWidth * 1.3f);
 
         int x = centerX - knobDiameter / 2;
@@ -566,16 +545,36 @@ void AudioPluginAudioProcessorEditor::resized()
     );
 }
 
+//==============================================================================
 // Timer callback Displayupdate
 void AudioPluginAudioProcessorEditor::timerCallback()
 {
-    // Überprüft ob FFT-Daten verfügbar sind
+    bool needsRepaint = false;
+
+    // Post-EQ FFT für Anzeige aktualisieren
     if (processorRef.getNextFFTBlockReady())
     {
-        // Verarbeitet die FFT Daten zur darstellung
         processorRef.updateSpectrumArray(processorRef.getSampleRate());
-        processorRef.setNextFFTBlockReady(false); // Reset flag
-        repaint(); // Triggert Redraw
+        processorRef.setNextFFTBlockReady(false);
+        needsRepaint = true;
+    }
+
+    // Pre-EQ FFT für Messung aktualisieren
+    if (processorRef.getNextPreEQFFTBlockReady())
+    {
+        processorRef.updatePreEQSpectrumArray(processorRef.getSampleRate());
+        processorRef.setNextPreEQFFTBlockReady(false);
+
+        // Snapshot speichern wenn Messung aktiv (verwendet Pre-EQ Spektrum!)
+        if (processorRef.isMeasuring())
+        {
+            processorRef.addMeasurementSnapshot();
+        }
+    }
+
+    if (needsRepaint)
+    {
+        repaint();
     }
 }
 
@@ -589,7 +588,6 @@ void AudioPluginAudioProcessorEditor::drawFrame(juce::Graphics& g)
     if (smoothedLevels.size() != spectrum.size())
     {
         smoothedLevels.resize(spectrum.size());
-        // Initialisierung mit aktuellen Werten
         for (size_t i = 0; i < spectrum.size(); ++i)
         {
             smoothedLevels[i] = spectrum[i].level;
@@ -629,16 +627,13 @@ void AudioPluginAudioProcessorEditor::drawFrame(juce::Graphics& g)
     }
 
     // RÄUMLICHES SMOOTHING ANWENDEN
-    // Extrahiere nur die Y-Werte (dB levels)
     std::vector<float> yValues;
     yValues.reserve(validPoints.size());
     for (const auto& point : validPoints)
         yValues.push_back(point.getY());
 
-    // Smoothing anwenden (windowSize = 5 für glattere Kurve, 3 für weniger smoothing)
     auto smoothedY = applySpatialSmoothing(yValues, 5);
 
-    // Punkte mit geglätteten Y-Werten aktualisieren
     for (size_t i = 0; i < validPoints.size() && i < smoothedY.size(); ++i)
         validPoints[i].setY(smoothedY[i]);
 
@@ -716,7 +711,7 @@ void AudioPluginAudioProcessorEditor::drawEQCurve(juce::Graphics& g)
     {
         float f0 = eqFrequencies[bandIdx];
         float gainDb = eqSlider[bandIdx].getValue();
-        float Q = eqKnob[bandIdx].getValue(); // Q-Wert vom Knob verwenden
+        float Q = eqKnob[bandIdx].getValue();
 
         if (std::abs(gainDb) > 0.01f)
         {
@@ -772,6 +767,9 @@ void AudioPluginAudioProcessorEditor::drawEQCurve(juce::Graphics& g)
 
     g.setColour(juce::Colours::yellow.withAlpha(0.15f));
     g.fillPath(filledPath);
+
+    // Ziel-Korrekturkurve zeichnen (wenn vorhanden)
+    drawTargetEQCurve(g);
 }
 
 std::complex<float> AudioPluginAudioProcessorEditor::peakingEQComplex(
@@ -802,4 +800,203 @@ std::complex<float> AudioPluginAudioProcessorEditor::peakingEQComplex(
     std::complex<float> den = 1.0f + a1 * expMinusJw + a2 * expMinus2Jw;
 
     return num / den;
+}
+
+//==============================================================================
+// Findet den Referenz-Level (Median) für eine gegebene Frequenz
+float AudioPluginAudioProcessorEditor::findReferenceLevel(float frequency) const
+{
+    if (processorRef.referenceBands.empty())
+        return 0.0f;
+
+    float closestDist = std::numeric_limits<float>::max();
+    float closestLevel = 0.0f;
+
+    for (const auto& band : processorRef.referenceBands)
+    {
+        float dist = std::abs(band.freq - frequency);
+        if (dist < closestDist)
+        {
+            closestDist = dist;
+            closestLevel = band.median;
+        }
+    }
+
+    return closestLevel;
+}
+
+//==============================================================================
+// Findet den gemessenen Level für eine gegebene Frequenz
+float AudioPluginAudioProcessorEditor::findMeasuredLevel(
+    float frequency,
+    const std::vector<AudioPluginAudioProcessor::SpectrumPoint>& spectrum) const
+{
+    if (spectrum.empty())
+        return 0.0f;
+
+    float closestDist = std::numeric_limits<float>::max();
+    float closestLevel = 0.0f;
+
+    for (const auto& point : spectrum)
+    {
+        float dist = std::abs(point.frequency - frequency);
+        if (dist < closestDist)
+        {
+            closestDist = dist;
+            closestLevel = point.level;
+        }
+    }
+
+    return closestLevel;
+}
+
+//==============================================================================
+// Auto-EQ anwenden (nur Visualisierung, keine Slider-Änderungen)
+void AudioPluginAudioProcessorEditor::applyAutoEQ()
+{
+    // Gemitteltes Spektrum holen (basiert auf Pre-EQ Daten!)
+    auto averagedSpectrum = processorRef.getAveragedSpectrum();
+
+    if (averagedSpectrum.empty())
+    {
+        DBG("Keine Messdaten vorhanden!");
+        return;
+    }
+
+    if (processorRef.referenceBands.empty())
+    {
+        DBG("Keine Referenzkurve geladen!");
+        return;
+    }
+
+    DBG("=== Auto-EQ Berechnung (Pre-EQ Messung) ===");
+    DBG("Anzahl Referenzbänder: " + juce::String(processorRef.referenceBands.size()));
+    DBG("Anzahl gemessene Bänder: " + juce::String(averagedSpectrum.size()));
+
+    // =========================================================================
+    // SCHRITT 1: Residuen berechnen
+    // =========================================================================
+
+    std::vector<float> residuals;
+    residuals.reserve(31);
+
+    for (int i = 0; i < 31; ++i)
+    {
+        float freq = eqFrequencies[i];
+
+        float refLevel = findReferenceLevel(freq);
+        float measuredLevel = findMeasuredLevel(freq, averagedSpectrum);
+
+        float residual = refLevel - measuredLevel;
+        residuals.push_back(residual);
+
+        DBG("Band " + juce::String(i) + " (" + juce::String(freq) + " Hz): "
+            + "Ref=" + juce::String(refLevel, 2)
+            + " Mess(Pre-EQ)=" + juce::String(measuredLevel, 2)
+            + " Diff=" + juce::String(residual, 2));
+    }
+
+    // =========================================================================
+    // SCHRITT 2: Mittleren Offset berechnen
+    // =========================================================================
+
+    float sumResiduals = 0.0f;
+    for (float r : residuals)
+        sumResiduals += r;
+
+    float meanOffset = sumResiduals / static_cast<float>(residuals.size());
+
+    DBG("Mittlerer Offset: " + juce::String(meanOffset, 2) + " dB");
+
+    inputGainSlider.setValue(meanOffset, juce::sendNotificationAsync);
+
+    // =========================================================================
+    // SCHRITT 3: Korrekturen berechnen und für Visualisierung speichern
+    // =========================================================================
+
+    DBG("=== EQ-Band Korrekturen (nur Visualisierung) ===");
+
+    for (int i = 0; i < 31; ++i)
+    {
+        float correction = residuals[i] - meanOffset;
+        correction = juce::jlimit(-12.0f, 12.0f, correction);
+
+        // Korrekturen für Visualisierung speichern (Slider werden NICHT verändert)
+        processorRef.targetCorrections[i] = correction;
+
+        DBG("Band " + juce::String(i) + " (" + juce::String(eqFrequencies[i]) + " Hz): "
+            + juce::String(correction, 2) + " dB");
+    }
+
+    // Flag setzen dass Zielkurve vorhanden ist
+    processorRef.hasTargetCorrections = true;
+
+    DBG("=== Auto-EQ Berechnung abgeschlossen (Kurve wird angezeigt) ===");
+
+    repaint();
+}
+
+//==============================================================================
+// Ziel-EQ-Kurve zeichnen (zeigt die berechneten Korrekturen)
+void AudioPluginAudioProcessorEditor::drawTargetEQCurve(juce::Graphics& g)
+{
+    if (!processorRef.hasTargetCorrections)
+        return;
+
+    auto area = spectrumInnerArea.toFloat();
+
+    const float minFreq = 20.0f;
+    const float maxFreq = 20000.0f;
+    const float minDb = -12.0f;
+    const float maxDb = 12.0f;
+
+    juce::Path targetPath;
+    bool firstPoint = true;
+
+    // Punkte für alle 31 EQ-Bänder zeichnen
+    for (int i = 0; i < 31; ++i)
+    {
+        float freq = eqFrequencies[i];
+        float correction = processorRef.targetCorrections[i];
+
+        // X-Position (logarithmisch)
+        float normX = juce::mapFromLog10(freq, minFreq, maxFreq);
+        float x = area.getX() + normX * area.getWidth();
+
+        // Y-Position (linear, invertiert)
+        float y = juce::jmap(correction, minDb, maxDb, area.getBottom(), area.getY());
+
+        if (firstPoint)
+        {
+            targetPath.startNewSubPath(x, y);
+            firstPoint = false;
+        }
+        else
+        {
+            targetPath.lineTo(x, y);
+        }
+    }
+
+    // Gestrichelte Linie für Zielkurve
+    juce::Path dashedPath;
+    float dashLengths[] = { 6.0f, 4.0f };
+    juce::PathStrokeType strokeType(2.0f);
+    strokeType.createDashedStroke(dashedPath, targetPath, dashLengths, 2);
+
+    g.setColour(juce::Colours::lime.withAlpha(0.9f));
+    g.fillPath(dashedPath);
+
+    // Punkte an den EQ-Frequenzen markieren
+    g.setColour(juce::Colours::lime);
+    for (int i = 0; i < 31; ++i)
+    {
+        float freq = eqFrequencies[i];
+        float correction = processorRef.targetCorrections[i];
+
+        float normX = juce::mapFromLog10(freq, minFreq, maxFreq);
+        float x = area.getX() + normX * area.getWidth();
+        float y = juce::jmap(correction, minDb, maxDb, area.getBottom(), area.getY());
+
+        g.fillEllipse(x - 3.0f, y - 3.0f, 6.0f, 6.0f);
+    }
 }
