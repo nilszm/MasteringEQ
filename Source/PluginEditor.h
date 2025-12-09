@@ -16,7 +16,104 @@ public:
     void paint(juce::Graphics&) override;
     void resized() override;
 
+ 
 private:
+    // Setup-Funktionen (aus Konstruktor ausgelagert)
+    void initializeWindow();
+    void setupGenreDropdown();
+    void setupWarningLabel();
+    void setupMeasurementButton();
+    void setupResetButton();
+    void setupEQCurveToggle();
+    void setupEQSliders();
+    void setupQKnobs();
+    void setupInputGainSlider();
+
+    // ============================================================================
+// Diese Funktionsdeklarationen in PluginEditor.h einfügen (private Bereich):
+// ============================================================================
+    // Draw-Funktionen (aus paint() ausgelagert)
+    void drawTopBar(juce::Graphics& g);
+    void drawBackground(juce::Graphics& g);
+    void drawSpectrumArea(juce::Graphics& g);
+    void drawReferenceBands(juce::Graphics& g, float minFreq, float maxFreq,
+        float displayMinDb, float displayMaxDb);
+    void drawFrequencyGrid(juce::Graphics& g);
+    void drawEQAreas(juce::Graphics& g);
+    void drawEQLabels(juce::Graphics& g);
+
+
+    // ============================================================================
+// Diese Funktionsdeklarationen in PluginEditor.h einfügen (private Bereich):
+// ============================================================================
+    // ============================================================================
+// Diese Funktionsdeklarationen in PluginEditor.h einfügen (private Bereich):
+// ============================================================================
+
+private:
+    // resized Hilfsfunktionen
+    void layoutTopBar(juce::Rectangle<int>& area);
+    void layoutSpectrumAreas(juce::Rectangle<int>& area);
+    void layoutEQAreas(juce::Rectangle<int>& area);
+    void layoutEQSliders();
+    void layoutQKnobs();
+    void calculateSpectrumInnerArea();
+private:
+    // applyAutoEQ Hilfsfunktionen
+    bool validateAutoEQData(
+        const std::vector<AudioPluginAudioProcessor::SpectrumPoint>& spectrum);
+
+    void logAutoEQStart(
+        const std::vector<AudioPluginAudioProcessor::SpectrumPoint>& spectrum);
+
+    std::vector<float> calculateResiduals(
+        const std::vector<AudioPluginAudioProcessor::SpectrumPoint>& spectrum);
+
+    float calculateMeanOffset(const std::vector<float>& residuals);
+
+    void applyCorrections(const std::vector<float>& residuals, float meanOffset);
+
+    // drawTargetEQCurve Hilfsfunktionen
+    juce::Path buildTargetPath();
+
+    void drawDashedTargetCurve(juce::Graphics& g, const juce::Path& targetPath);
+
+    void drawTargetPoints(juce::Graphics& g);
+
+    // ============================================================================
+// Diese Funktionsdeklarationen in PluginEditor.h einfügen (private Bereich):
+// ============================================================================
+
+private:
+    // drawEQCurve Hilfsfunktionen
+    std::vector<float> generateLogFrequencies(int numPoints, float minFreq, float maxFreq);
+
+    std::vector<float> calculateTotalMagnitude(
+        const std::vector<float>& frequencies, int numPoints);
+
+    juce::Path buildEQPath(
+        const std::vector<float>& frequencies,
+        const std::vector<float>& magnitudeDB,
+        int numPoints, float minFreq, float maxFreq);
+
+    void drawEQPathWithFill(juce::Graphics& g, const juce::Path& eqPath);
+
+    // drawFrame Hilfsfunktionen
+    void initializeSmoothedLevels(
+        const std::vector<AudioPluginAudioProcessor::SpectrumPoint>& spectrum);
+
+    std::vector<juce::Point<float>> calculateSpectrumPoints(
+        const std::vector<AudioPluginAudioProcessor::SpectrumPoint>& spectrum);
+
+    void applySpatialSmoothingToPoints(std::vector<juce::Point<float>>& points);
+
+    void extrapolateTo20Hz(
+        std::vector<juce::Point<float>>& points,
+        const std::vector<AudioPluginAudioProcessor::SpectrumPoint>& spectrum);
+
+    void drawSpectrumPath(
+        juce::Graphics& g,
+        const std::vector<juce::Point<float>>& points);
 
     // Timer callback for GUI updates
     void timerCallback() override;
@@ -104,6 +201,9 @@ private:
 
     // EQ Beschriftungsbereich
     juce::Rectangle<int> eqLabelArea;
+
+    // Bei den anderen Member-Variablen hinzufügen:
+    juce::Label warningLabel;
 
     bool showEQCurve = false;
     juce::TextButton eqCurveToggleButton;
