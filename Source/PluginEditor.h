@@ -85,6 +85,14 @@ private:
 // ============================================================================
 
 private:
+    // Offset
+    float referenceViewOffsetDb = 0.0f;
+    float referenceViewOffsetDbSmoothed = 0.0f;
+
+    float computeReferenceViewOffsetDb(
+        const std::vector<AudioPluginAudioProcessor::SpectrumPoint>& spectrum) const;
+
+
     // drawEQCurve Hilfsfunktionen
     std::vector<float> generateLogFrequencies(int numPoints, float minFreq, float maxFreq);
 

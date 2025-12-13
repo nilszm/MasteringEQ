@@ -14,6 +14,99 @@
 #include <limits>
 
  //==============================================================================
+ //                           Log-Interpolation
+ //==============================================================================
+
+namespace
+{
+    static float sampleLogInterpolatedSpectrum(
+        const std::vector<AudioPluginAudioProcessor::SpectrumPoint>& pts,
+        float fHz,
+        float fallbackDb)
+    {
+        if (pts.empty())
+            return fallbackDb;
+
+        if (fHz <= pts.front().frequency) return pts.front().level;
+        if (fHz >= pts.back().frequency)  return pts.back().level;
+
+        const float lf = std::log10(fHz);
+
+        for (size_t i = 1; i < pts.size(); ++i)
+        {
+            const float f1 = pts[i].frequency;
+            if (f1 >= fHz)
+            {
+                const float f0 = pts[i - 1].frequency;
+
+                const float l0 = std::log10(f0);
+                const float l1 = std::log10(f1);
+
+                const float t = (lf - l0) / (l1 - l0);
+
+                return pts[i - 1].level + t * (pts[i].level - pts[i - 1].level);
+            }
+        }
+
+        return pts.back().level;
+    }
+
+    // Interpoliert Median der Referenzbänder
+    static float sampleLogInterpolatedReferenceMedian(
+        const std::vector<AudioPluginAudioProcessor::ReferenceBand>& ref,
+        float fHz,
+        float fallbackDb)
+    {
+        if (ref.empty())
+            return fallbackDb;
+
+        if (fHz <= ref.front().freq) return ref.front().median;
+        if (fHz >= ref.back().freq)  return ref.back().median;
+
+        const float lf = std::log10(fHz);
+
+        for (size_t i = 1; i < ref.size(); ++i)
+        {
+            const float f1 = ref[i].freq;
+            if (f1 >= fHz)
+            {
+                const float f0 = ref[i - 1].freq;
+
+                const float l0 = std::log10(f0);
+                const float l1 = std::log10(f1);
+
+                const float t = (lf - l0) / (l1 - l0);
+
+                return ref[i - 1].median + t * (ref[i].median - ref[i - 1].median);
+            }
+        }
+
+        return ref.back().median;
+    }
+}
+
+ //==============================================================================
+ //                               Smoothing
+ //==============================================================================
+ 
+namespace
+{
+    static std::vector<float> smoothResiduals3(const std::vector<float>& r)
+    {
+        if (r.size() < 3)
+            return r;
+
+        std::vector<float> out = r;
+
+        // Ränder belassen
+        for (size_t i = 1; i + 1 < r.size(); ++i)
+            out[i] = 0.25f * r[i - 1] + 0.5f * r[i] + 0.25f * r[i + 1];
+
+        return out;
+    }
+}
+
+ //==============================================================================
  //                              KONSTRUKTOR
  //==============================================================================
 
@@ -55,6 +148,45 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor(AudioPluginAudi
 AudioPluginAudioProcessorEditor::~AudioPluginAudioProcessorEditor()
 {
 }
+
+//==============================================================================
+//                                OFFSET
+//==============================================================================
+
+float AudioPluginAudioProcessorEditor::computeReferenceViewOffsetDb(
+    const std::vector<AudioPluginAudioProcessor::SpectrumPoint>& spectrum) const
+{
+    if (spectrum.empty() || processorRef.referenceBands.empty())
+        return 0.0f;
+
+    std::vector<float> diffs;
+    diffs.reserve(31);
+
+    // Mittlerer Bereich für stabile Werte
+    const float fMin = 50.0f;
+    const float fMax = 10000.0f;
+
+    for (float f : eqFrequencies)
+    {
+        if (f < fMin || f > fMax) continue;
+
+        const float ref = findReferenceLevel(f);
+        const float meas = sampleLogInterpolatedSpectrum(spectrum, f, DisplayScale::minDb);
+
+        diffs.push_back(ref - meas);
+    }
+
+    if (diffs.empty())
+        return 0.0f;
+
+    // Median
+    std::nth_element(diffs.begin(), diffs.begin() + diffs.size() / 2, diffs.end());
+    float median = diffs[diffs.size() / 2];
+
+    // Clamping
+    return juce::jlimit(-36.0f, 36.0f, median);
+}
+
 
 //==============================================================================
 //                           SETUP-FUNKTIONEN
@@ -677,6 +809,22 @@ void AudioPluginAudioProcessorEditor::timerCallback()
     {
         processorRef.updateSpectrumArray(processorRef.getSampleRate());
         processorRef.setNextFFTBlockReady(false);
+
+        // Offset live berechnen
+        if (!processorRef.referenceBands.empty())
+        {
+            const float targetOffset = computeReferenceViewOffsetDb(processorRef.spectrumArray);
+
+            // Glätten
+            const float a = 0.90f; // 0.90 = sehr ruhig
+            referenceViewOffsetDbSmoothed = a * referenceViewOffsetDbSmoothed + (1.0f - a) * targetOffset;
+            referenceViewOffsetDb = referenceViewOffsetDbSmoothed;
+        }
+        else
+        {
+            referenceViewOffsetDb = referenceViewOffsetDbSmoothed = 0.0f;
+        }
+
         needsRepaint = true;
     }
 
@@ -954,6 +1102,8 @@ std::vector<juce::Point<float>> AudioPluginAudioProcessorEditor::calculateSpectr
             point.level * (1.0f - smoothingFactor);
 
         float level = smoothedLevels[i];
+        if (!showEQCurve && !processorRef.referenceBands.empty())
+            level += referenceViewOffsetDb;
 
         // Frequenz logarithmisch auf X-Position abbilden
         float logFreq = std::log10(point.frequency);
@@ -1337,21 +1487,22 @@ void AudioPluginAudioProcessorEditor::applyAutoEQ()
     // 1. Residuen (Differenzen) für alle Bänder berechnen
     auto residuals = calculateResiduals(averagedSpectrum);
 
-    // 2. Mittleren Offset berechnen (für Lautheitsanpassung)
+    // 2. Leichte Glättung
+    residuals = smoothResiduals3(residuals);
+
+    // 3. Mittleren Offset berechnen (für Lautheitsanpassung)
     float meanOffset = calculateMeanOffset(residuals);
 
-    // 3. Input-Gain für globale Lautheitsanpassung setzen
-    if (auto* p = dynamic_cast<juce::AudioParameterFloat*>(processorRef.apvts.getParameter("inputGain")))
-    {
-        p->beginChangeGesture();
-        p->setValueNotifyingHost(p->convertTo0to1(meanOffset));
-        p->endChangeGesture();
-    }
+    // 4. Residual machen
+    for (auto& r : residuals)
+        r -= meanOffset;
 
-    // 4. Band-spezifische Korrekturen anwenden
-    applyCorrections(residuals, meanOffset);
+    residuals = smoothResiduals3(residuals);
 
-    // Flag setzen dass Zielkurve berechnet wurde
+    // 5. Band-spezifische Korrekturen anwenden
+    applyCorrections(residuals, 0.0f);
+
+    // 6. Flag setzen dass Zielkurve berechnet wurde
     processorRef.hasTargetCorrections = true;
 
     DBG("=== Auto-EQ Berechnung abgeschlossen (Kurve wird angezeigt) ===");
@@ -1424,6 +1575,11 @@ std::vector<float> AudioPluginAudioProcessorEditor::calculateResiduals(
         float refLevel = findReferenceLevel(freq);
         float measuredLevel = findMeasuredLevel(freq, spectrum);
 
+        // Gate, falls Messung zu nah am Rand ist
+        const float gateDb = DisplayScale::minDb + 10.0f;
+        if (measuredLevel < gateDb)
+            measuredLevel = gateDb;
+
         // Residuum = wie viel muss korrigiert werden
         float residual = refLevel - measuredLevel;
 
@@ -1493,8 +1649,8 @@ void AudioPluginAudioProcessorEditor::applyCorrections(
 
     for (int i = 0; i < 31; ++i)
     {
-        // Korrektur = Residuum minus mittlerer Offset
-        float correction = residuals[i] - meanOffset;
+        // Korrektur = Residuumt
+        float correction = residuals[i];
 
         // Auf ±12 dB begrenzen
         correction = juce::jlimit(-12.0f, 12.0f, correction);
@@ -1520,27 +1676,16 @@ void AudioPluginAudioProcessorEditor::applyCorrections(
  * @param frequency Die gesuchte Frequenz in Hz
  * @return Der Median-Level in dB, oder 0 wenn keine Referenz vorhanden
  */
+
+
 float AudioPluginAudioProcessorEditor::findReferenceLevel(float frequency) const
 {
-    if (processorRef.referenceBands.empty())
-        return 0.0f;
-
-    float closestDist = std::numeric_limits<float>::max();
-    float closestLevel = 0.0f;
-
-    // Nächsten Frequenzpunkt suchen
-    for (const auto& band : processorRef.referenceBands)
-    {
-        float dist = std::abs(band.freq - frequency);
-        if (dist < closestDist)
-        {
-            closestDist = dist;
-            closestLevel = band.median;
-        }
-    }
-
-    return closestLevel;
+    return sampleLogInterpolatedReferenceMedian(processorRef.referenceBands,
+        frequency,
+        DisplayScale::minDb);
 }
+
+
 
 /**
  * @brief Findet den gemessenen Level für eine gegebene Frequenz.
@@ -1556,24 +1701,7 @@ float AudioPluginAudioProcessorEditor::findMeasuredLevel(
     float frequency,
     const std::vector<AudioPluginAudioProcessor::SpectrumPoint>& spectrum) const
 {
-    if (spectrum.empty())
-        return 0.0f;
-
-    float closestDist = std::numeric_limits<float>::max();
-    float closestLevel = 0.0f;
-
-    // Nächsten Frequenzpunkt suchen
-    for (const auto& point : spectrum)
-    {
-        float dist = std::abs(point.frequency - frequency);
-        if (dist < closestDist)
-        {
-            closestDist = dist;
-            closestLevel = point.level;
-        }
-    }
-
-    return closestLevel;
+    return sampleLogInterpolatedSpectrum(spectrum, frequency, DisplayScale::minDb);
 }
 
 //==============================================================================

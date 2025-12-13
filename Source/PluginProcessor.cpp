@@ -268,19 +268,6 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear(i, 0, buffer.getNumSamples());
 
-    // Input Gain anwenden
-    float inputGainDb = apvts.getRawParameterValue("inputGain")->load();
-    float inputGainLinear = juce::Decibels::decibelsToGain(inputGainDb);
-
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
-    {
-        auto* channelData = buffer.getWritePointer(channel);
-        for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
-        {
-            channelData[sample] *= inputGainLinear;
-        }
-    }
-
     //==========================================================================
     // PRE-EQ FFT: Samples VOR den Filtern erfassen (für Messung)
     //==========================================================================
@@ -309,6 +296,19 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
         }
     }
 
+    // Input Gain anwenden
+    float inputGainDb = apvts.getRawParameterValue("inputGain")->load();
+    float inputGainLinear = juce::Decibels::decibelsToGain(inputGainDb);
+
+    for (int channel = 0; channel < totalNumInputChannels; ++channel)
+    {
+        auto* channelData = buffer.getWritePointer(channel);
+        for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+        {
+            channelData[sample] *= inputGainLinear;
+        }
+    }
+
     //==========================================================================
     // EQ-Filter anwenden
     //==========================================================================
@@ -328,7 +328,7 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
         }
     }
 
-    //==========================================================================
+//==========================================================================
 // POST-EQ FFT: Samples NACH den Filtern erfassen (für Anzeige)
 // Mono-Summe aus beiden Kanälen (L+R gemittelt)
 //==========================================================================
@@ -436,8 +436,12 @@ void AudioPluginAudioProcessor::updateSpectrumArray(double sampleRate)
         int lowerBin = (int)std::floor(lowerFreq / binWidth);
         int upperBin = (int)std::ceil(upperFreq / binWidth);
 
-        lowerBin = juce::jlimit(0, fftSize / 2, lowerBin);
-        upperBin = juce::jlimit(0, fftSize / 2, upperBin);
+        const int maxBin = (fftSize / 2) - 1;  // gültig: 0..(fftSize/2 - 1)
+        lowerBin = juce::jlimit(1, maxBin, lowerBin);
+        upperBin = juce::jlimit(1, maxBin, upperBin);
+
+        if (upperBin < lowerBin)
+            continue;
 
         // Energie über alle Bins im Band summieren
         float bandEnergy = 0.0f;
@@ -504,8 +508,12 @@ void AudioPluginAudioProcessor::updatePreEQSpectrumArray(double sampleRate)
         int lowerBin = (int)std::floor(lowerFreq / binWidth);
         int upperBin = (int)std::ceil(upperFreq / binWidth);
 
-        lowerBin = juce::jlimit(0, fftSize / 2, lowerBin);
-        upperBin = juce::jlimit(0, fftSize / 2, upperBin);
+        const int maxBin = (fftSize / 2) - 1;  // gültig: 0..(fftSize/2 - 1)
+        lowerBin = juce::jlimit(1, maxBin, lowerBin);
+        upperBin = juce::jlimit(1, maxBin, upperBin);
+
+        if (upperBin < lowerBin)
+            continue;
 
         // Energie über alle Bins im Band summieren
         float bandEnergy = 0.0f;
@@ -605,39 +613,53 @@ void AudioPluginAudioProcessor::clearMeasurement()
 std::vector<AudioPluginAudioProcessor::SpectrumPoint>
 AudioPluginAudioProcessor::getAveragedSpectrum() const
 {
-    const float floorDb = -160.0f;
     std::vector<SpectrumPoint> averaged;
 
     if (measurementBuffer.empty())
         return averaged;
 
-    size_t numBands = measurementBuffer[0].size();
-    size_t numSnapshots = measurementBuffer.size();
+    const size_t numBands = measurementBuffer[0].size();
+    const size_t numSnapshots = measurementBuffer.size();
 
     averaged.resize(numBands);
 
+    constexpr float floorDb = -160.0f;
+    const float floorPower = std::pow(10.0f, floorDb / 10.0f);
+
     for (size_t band = 0; band < numBands; ++band)
     {
-        float levelSum = 0.0f;
+        double powerSum = 0.0;
         int validCount = 0;
 
         for (const auto& snapshot : measurementBuffer)
         {
             if (band < snapshot.size())
             {
-                levelSum += snapshot[band].level;
-                validCount++;
+                const float db = snapshot[band].level;
+                const double p = std::pow(10.0, (double)db / 10.0);
+
+                powerSum += p;
+                ++validCount;
             }
         }
 
         // Frequenz aus erstem Snapshot übernehmen (ist konstant)
         averaged[band].frequency = measurementBuffer[0][band].frequency;
 
-        // Mittelwert berechnen
+        // Mittelwert Power-Domain berechnen
         if (validCount > 0)
-            averaged[band].level = levelSum / static_cast<float>(validCount);
+        {
+            const double meanPower = powerSum / (double)validCount;
+
+            if (meanPower <= floorPower)
+                averaged[band].level = floorDb;
+            else
+                averaged[band].level = (float)(10.0 * std::log10(meanPower));
+        }
         else
+        {
             averaged[band].level = floorDb;
+        }
     }
 
     return averaged;
