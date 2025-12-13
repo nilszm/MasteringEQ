@@ -410,7 +410,7 @@ void AudioPluginAudioProcessor::updateSpectrumArray(double sampleRate)
     // Terzband-Mittenfrequenzen (nach IEC 61260)
     // Von 25 Hz bis 20 kHz
     std::vector<float> thirdOctaveCenterFreqs = {
-        25.0f, 31.5f, 40.0f, 50.0f, 63.0f, 80.0f, 100.0f, 125.0f, 160.0f, 200.0f,
+        20.0f, 25.0f, 31.5f, 40.0f, 50.0f, 63.0f, 80.0f, 100.0f, 125.0f, 160.0f, 200.0f,
         250.0f, 315.0f, 400.0f, 500.0f, 630.0f, 800.0f, 1000.0f, 1250.0f, 1600.0f, 2000.0f,
         2500.0f, 3150.0f, 4000.0f, 5000.0f, 6300.0f, 8000.0f, 10000.0f, 12500.0f, 16000.0f, 20000.0f
     };
@@ -456,19 +456,12 @@ void AudioPluginAudioProcessor::updateSpectrumArray(double sampleRate)
 
         float bandMagnitude = std::sqrt(bandEnergy);
 
-        // Schutz vor log(0)
-        if (bandMagnitude <= 0.0f)
-            bandMagnitude = 1.0e-9f;
-
         // In dB umrechnen
-        float dbFs = juce::Decibels::gainToDecibels(bandMagnitude);
-        float displayDb = dbFs + DisplayScale::offsetDb;
-
-        // Auf Ausgangsbereich begrenzen
-        displayDb = juce::jlimit(DisplayScale::minDb, DisplayScale::maxDb, displayDb);
+        const float floorDb = -160.0f;
+        float dbFs = juce::Decibels::gainToDecibels(bandMagnitude, floorDb);
 
         // Speichern
-        spectrumArray.push_back({ centerFreq, displayDb });
+        spectrumArray.push_back({ centerFreq, dbFs });
     }
 }
 
@@ -485,7 +478,7 @@ void AudioPluginAudioProcessor::updatePreEQSpectrumArray(double sampleRate)
 
     // Terzband-Mittenfrequenzen (nach IEC 61260)
     std::vector<float> thirdOctaveCenterFreqs = {
-        25.0f, 31.5f, 40.0f, 50.0f, 63.0f, 80.0f, 100.0f, 125.0f, 160.0f, 200.0f,
+        20.0f, 25.0f, 31.5f, 40.0f, 50.0f, 63.0f, 80.0f, 100.0f, 125.0f, 160.0f, 200.0f,
         250.0f, 315.0f, 400.0f, 500.0f, 630.0f, 800.0f, 1000.0f, 1250.0f, 1600.0f, 2000.0f,
         2500.0f, 3150.0f, 4000.0f, 5000.0f, 6300.0f, 8000.0f, 10000.0f, 12500.0f, 16000.0f, 20000.0f
     };
@@ -531,19 +524,12 @@ void AudioPluginAudioProcessor::updatePreEQSpectrumArray(double sampleRate)
 
         float bandMagnitude = std::sqrt(bandEnergy);
 
-        // Schutz vor log(0)
-        if (bandMagnitude <= 0.0f)
-            bandMagnitude = 1.0e-9f;
-
         // In dB umrechnen
-        float dbFs = juce::Decibels::gainToDecibels(bandMagnitude);
-        float displayDb = dbFs + DisplayScale::offsetDb;
-
-        // Auf Ausgangsbereich begrenzen
-        displayDb = juce::jlimit(DisplayScale::minDb, DisplayScale::maxDb, displayDb);
+        const float floorDb = -160.0f;
+        float dbFs = juce::Decibels::gainToDecibels(bandMagnitude, floorDb);
 
         // Speichern
-        preEQSpectrumArray.push_back({ centerFreq, displayDb });
+        preEQSpectrumArray.push_back({ centerFreq, dbFs });
     }
 }
 
@@ -619,6 +605,7 @@ void AudioPluginAudioProcessor::clearMeasurement()
 std::vector<AudioPluginAudioProcessor::SpectrumPoint>
 AudioPluginAudioProcessor::getAveragedSpectrum() const
 {
+    const float floorDb = -160.0f;
     std::vector<SpectrumPoint> averaged;
 
     if (measurementBuffer.empty())
@@ -650,7 +637,7 @@ AudioPluginAudioProcessor::getAveragedSpectrum() const
         if (validCount > 0)
             averaged[band].level = levelSum / static_cast<float>(validCount);
         else
-            averaged[band].level = DisplayScale::minDb;
+            averaged[band].level = floorDb;
     }
 
     return averaged;

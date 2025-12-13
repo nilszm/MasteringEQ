@@ -102,7 +102,7 @@ void AudioPluginAudioProcessorEditor::setupGenreDropdown()
             switch (id)
             {
             case 1:
-                processorRef.loadReferenceCurve("pop_medref.json");
+                processorRef.loadReferenceCurve("pop_neu.json");
                 break;
             case 2:
                 processorRef.loadReferenceCurve("HipHop.json");
@@ -477,23 +477,32 @@ void AudioPluginAudioProcessorEditor::drawReferenceBands(juce::Graphics& g,
     juce::Path pathMedian;
     bool firstPoint = true;
 
+    auto clampDb = [&](float db)
+        {
+            return juce::jlimit(displayMinDb, displayMaxDb, db);
+        };
+
     // Durch alle Referenzbänder iterieren und Pfade aufbauen
     for (const auto& band : processorRef.referenceBands)
     {
+        // Frequenzbänder außerhalb der Darstellung überspringen
+        if (band.freq < minFreq || band.freq > maxFreq)
+            continue;
+
         // X-Position: Frequenz logarithmisch auf Pixelposition abbilden
         float normX = juce::mapFromLog10(band.freq, minFreq, maxFreq);
         float x = spectrumInnerArea.getX() + normX * spectrumInnerArea.getWidth();
 
         // Y-Positionen: dB-Werte auf Pixelpositionen abbilden (invertiert: oben = laut)
-        float yP10 = juce::jmap(band.p10, displayMinDb, displayMaxDb,
+        float yP10 = juce::jmap(clampDb(band.p10), displayMinDb, displayMaxDb,
             (float)spectrumInnerArea.getBottom(),
             (float)spectrumInnerArea.getY());
 
-        float yMedian = juce::jmap(band.median, displayMinDb, displayMaxDb,
+        float yMedian = juce::jmap(clampDb(band.median), displayMinDb, displayMaxDb,
             (float)spectrumInnerArea.getBottom(),
             (float)spectrumInnerArea.getY());
 
-        float yP90 = juce::jmap(band.p90, displayMinDb, displayMaxDb,
+        float yP90 = juce::jmap(clampDb(band.p90), displayMinDb, displayMaxDb,
             (float)spectrumInnerArea.getBottom(),
             (float)spectrumInnerArea.getY());
 
@@ -1332,7 +1341,12 @@ void AudioPluginAudioProcessorEditor::applyAutoEQ()
     float meanOffset = calculateMeanOffset(residuals);
 
     // 3. Input-Gain für globale Lautheitsanpassung setzen
-    inputGainSlider.setValue(meanOffset, juce::sendNotificationAsync);
+    if (auto* p = dynamic_cast<juce::AudioParameterFloat*>(processorRef.apvts.getParameter("inputGain")))
+    {
+        p->beginChangeGesture();
+        p->setValueNotifyingHost(p->convertTo0to1(meanOffset));
+        p->endChangeGesture();
+    }
 
     // 4. Band-spezifische Korrekturen anwenden
     applyCorrections(residuals, meanOffset);
@@ -1435,14 +1449,30 @@ std::vector<float> AudioPluginAudioProcessorEditor::calculateResiduals(
  */
 float AudioPluginAudioProcessorEditor::calculateMeanOffset(const std::vector<float>& residuals)
 {
-    float sumResiduals = 0.0f;
-    for (float r : residuals)
-        sumResiduals += r;
+    // Offset-Berechnung: nur sinnvolle Bänder nutzen
+    const float fMin = 50.0f;
+    const float fMax = 10000.0f;
 
-    float meanOffset = sumResiduals / static_cast<float>(residuals.size());
+    float sum = 0.0f;
+    int count = 0;
 
-    DBG("Mittlerer Offset: " + juce::String(meanOffset, 2) + " dB");
+    for (int i = 0; i < 31; ++i)
+    {
+        const float f = eqFrequencies[i];
 
+        if (f < fMin || f > fMax)
+            continue;
+
+        sum += residuals[i];
+        ++count;
+    }
+
+    float meanOffset = (count > 0) ? (sum / (float)count) : 0.0f;
+
+    // Auf InputGain-Range clampen
+    meanOffset = juce::jlimit(-24.0f, 24.0f, meanOffset);
+
+    DBG("Mittlerer Offset (50Hz-10kHz): " + juce::String(meanOffset, 2) + " dB");
     return meanOffset;
 }
 

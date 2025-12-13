@@ -5,9 +5,8 @@
 
 namespace DisplayScale
 {
-    constexpr float offsetDb = 100.0f; // dBFS -> Display-Einheit
-    constexpr float minDb = 20.0f; // Untere Anzeigegrenze
-    constexpr float maxDb = 80.0f; // Obere Anzeigegrenze
+    constexpr float minDb = -140.0f; // Untere Anzeigegrenze
+    constexpr float maxDb = -20.0f; // Obere Anzeigegrenze
 }
 
 //==============================================================================
