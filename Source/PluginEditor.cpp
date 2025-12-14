@@ -14,6 +14,70 @@
 #include <limits>
 
  //==============================================================================
+ //                           Max-Correction
+ //==============================================================================
+
+namespace
+{
+    // Defaults
+    constexpr float kAutoEqAmount = 1.0f; // 50%
+    constexpr float kAutoEqMaxCorr = 12.0f;  // ±10 dB
+
+    // Fixe Y-Skalierung für Referenz-Ansicht (Spektrumansicht)
+    constexpr float kRefViewMinDb = -100.0f;  // unten
+    constexpr float kRefViewMaxDb = -45.0f;  // oben
+
+    // Rand-Fade: Bass & Air entschärfen
+    static float edgeWeight(float f)
+    {
+        // Fade-in 20..40 Hz
+        if (f < 40.0f)
+            return juce::jlimit(0.0f, 1.0f, juce::jmap(f, 20.0f, 40.0f, 0.0f, 1.0f));
+
+        // Fade-out 16k..20k
+        if (f > 16000.0f)
+            return juce::jlimit(0.0f, 1.0f, juce::jmap(f, 16000.0f, 20000.0f, 1.0f, 0.0f));
+
+        return 1.0f;
+    }
+
+    // Breitband-Smoothing (Moving Average)
+    static std::vector<float> smoothMovingAverage(const std::vector<float>& in, int windowSize, int passes)
+    {
+        if ((int)in.size() < 3 || windowSize < 3)
+            return in;
+
+        std::vector<float> cur = in;
+        std::vector<float> out(in.size());
+        const int half = windowSize / 2;
+
+        for (int pass = 0; pass < passes; ++pass)
+        {
+            for (int i = 0; i < (int)cur.size(); ++i)
+            {
+                double sum = 0.0;
+                int count = 0;
+
+                for (int j = -half; j <= half; ++j)
+                {
+                    const int idx = i + j;
+                    if (idx >= 0 && idx < (int)cur.size())
+                    {
+                        sum += cur[(size_t)idx];
+                        ++count;
+                    }
+                }
+
+                out[(size_t)i] = (count > 0) ? (float)(sum / (double)count) : cur[(size_t)i];
+            }
+            cur.swap(out);
+        }
+
+        return cur;
+    }
+}
+
+ //==============================================================================
  //                           Log-Interpolation
  //==============================================================================
 
@@ -552,8 +616,8 @@ void AudioPluginAudioProcessorEditor::drawSpectrumArea(juce::Graphics& g)
     // Konstanten für Frequenz- und dB-Bereich
     const float minFreq = 20.0f;
     const float maxFreq = 20000.0f;
-    const float displayMinDb = DisplayScale::minDb;
-    const float displayMaxDb = DisplayScale::maxDb;
+    const float displayMinDb = kRefViewMinDb;
+    const float displayMaxDb = kRefViewMaxDb;
 
     // Debug-Bereiche färben (TODO: Im Release entfernen)
     g.setColour(juce::Colours::orange);
@@ -1079,8 +1143,9 @@ std::vector<juce::Point<float>> AudioPluginAudioProcessorEditor::calculateSpectr
     auto area = spectrumInnerArea.toFloat();
 
     // Display-Grenzen
-    const float displayMinDb = DisplayScale::minDb;
-    const float displayMaxDb = DisplayScale::maxDb;
+    // Display-Grenzen je nach Ansicht
+    const float displayMinDb = showEQCurve ? -12.0f : kRefViewMinDb;
+    const float displayMaxDb = showEQCurve ? 12.0f : kRefViewMaxDb;
     const float minFreq = 20.0f;
     const float maxFreq = 20000.0f;
     const float logMin = std::log10(minFreq);
@@ -1102,7 +1167,7 @@ std::vector<juce::Point<float>> AudioPluginAudioProcessorEditor::calculateSpectr
             point.level * (1.0f - smoothingFactor);
 
         float level = smoothedLevels[i];
-        if (!showEQCurve && !processorRef.referenceBands.empty())
+        if (!processorRef.referenceBands.empty())
             level += referenceViewOffsetDb;
 
         // Frequenz logarithmisch auf X-Position abbilden
@@ -1474,40 +1539,56 @@ std::complex<float> AudioPluginAudioProcessorEditor::peakingEQComplex(
  */
 void AudioPluginAudioProcessorEditor::applyAutoEQ()
 {
-    // Gemitteltes Pre-EQ Spektrum aus der Messung holen
     auto averagedSpectrum = processorRef.getAveragedSpectrum();
 
-    // Validierung der Eingabedaten
     if (!validateAutoEQData(averagedSpectrum))
         return;
 
-    // Debug-Ausgabe starten
     logAutoEQStart(averagedSpectrum);
 
-    // 1. Residuen (Differenzen) für alle Bänder berechnen
-    auto residuals = calculateResiduals(averagedSpectrum);
+    const float offsetDb = computeReferenceViewOffsetDb(averagedSpectrum);
 
-    // 2. Leichte Glättung
-    residuals = smoothResiduals3(residuals);
+    auto residuals = calculateResidualsAligned(averagedSpectrum, offsetDb);
 
-    // 3. Mittleren Offset berechnen (für Lautheitsanpassung)
-    float meanOffset = calculateMeanOffset(residuals);
+    auto dbgMinMax = [](const char* name, const std::vector<float>& v)
+        {
+            if (v.empty()) return;
+            auto mm = std::minmax_element(v.begin(), v.end());
+            DBG(juce::String(name) + "  min=" + juce::String(*mm.first, 2) +
+                "  max=" + juce::String(*mm.second, 2));
+        };
 
-    // 4. Residual machen
+    dbgMinMax("raw residuals", residuals);
+
+    // meanOffset sauber raus (50 Hz – 10 kHz)
+    const float meanOffset = calculateMeanOffset(residuals);
+
+    // NICHT plattbügeln: nur wenig globalen Offset rausnehmen
     for (auto& r : residuals)
-        r -= meanOffset;
+        r -= 0.2f * meanOffset;
 
-    residuals = smoothResiduals3(residuals);
+    dbgMinMax("after mean removal", residuals);
 
-    // 5. Band-spezifische Korrekturen anwenden
+    // breitbandiges Smoothing (Mastering-tauglich)
+    residuals = smoothMovingAverage(residuals, 5, 1); // weniger platt als 7/11
+    dbgMinMax("after smoothing", residuals);
+
+    // Amount 30%
+    for (auto& r : residuals)
+        r *= kAutoEqAmount;
+
+    dbgMinMax("after amount", residuals);
+
+    // in targetCorrections speichern (Clamp macht applyCorrections)
     applyCorrections(residuals, 0.0f);
 
-    // 6. Flag setzen dass Zielkurve berechnet wurde
+
     processorRef.hasTargetCorrections = true;
 
     DBG("=== Auto-EQ Berechnung abgeschlossen (Kurve wird angezeigt) ===");
     repaint();
 }
+
 
 //==============================================================================
 //                    AUTO-EQ HILFSFUNKTIONEN
@@ -1552,48 +1633,33 @@ void AudioPluginAudioProcessorEditor::logAutoEQStart(
     DBG("Anzahl gemessene Bänder: " + juce::String(spectrum.size()));
 }
 
-/**
- * @brief Berechnet die Residuen (Differenzen) zwischen Referenz und Messung.
- *
- * Für jedes der 31 EQ-Bänder wird die Differenz zwischen
- * Referenzwert und gemessenem Wert berechnet.
- *
- * @param spectrum Das gemessene Spektrum
- * @return Vector mit Residuen für alle 31 Bänder
- */
-std::vector<float> AudioPluginAudioProcessorEditor::calculateResiduals(
-    const std::vector<AudioPluginAudioProcessor::SpectrumPoint>& spectrum)
+std::vector<float> AudioPluginAudioProcessorEditor::calculateResidualsAligned(
+    const std::vector<AudioPluginAudioProcessor::SpectrumPoint>& spectrum,
+    float offsetDb)
 {
     std::vector<float> residuals;
     residuals.reserve(31);
 
     for (int i = 0; i < 31; ++i)
     {
-        float freq = eqFrequencies[i];
+        const float freq = eqFrequencies[i];
 
-        // Nächsten Referenz- und Messwert finden
-        float refLevel = findReferenceLevel(freq);
+        const float refLevel = findReferenceLevel(freq);
         float measuredLevel = findMeasuredLevel(freq, spectrum);
 
-        // Gate, falls Messung zu nah am Rand ist
         const float gateDb = DisplayScale::minDb + 10.0f;
         if (measuredLevel < gateDb)
             measuredLevel = gateDb;
 
-        // Residuum = wie viel muss korrigiert werden
-        float residual = refLevel - measuredLevel;
+        measuredLevel += offsetDb;
 
-        residuals.push_back(residual);
-
-        // Debug-Ausgabe für jedes Band
-        DBG("Band " + juce::String(i) + " (" + juce::String(freq) + " Hz): "
-            + "Ref=" + juce::String(refLevel, 2)
-            + " Mess(Pre-EQ)=" + juce::String(measuredLevel, 2)
-            + " Diff=" + juce::String(residual, 2));
+        const float residual = refLevel - measuredLevel;
+        residuals.push_back(residual * edgeWeight(freq));
     }
 
     return residuals;
 }
+
 
 /**
  * @brief Berechnet den mittleren Offset aller Residuen.
@@ -1649,18 +1715,16 @@ void AudioPluginAudioProcessorEditor::applyCorrections(
 
     for (int i = 0; i < 31; ++i)
     {
-        // Korrektur = Residuumt
         float correction = residuals[i];
 
-        // Auf ±12 dB begrenzen
-        correction = juce::jlimit(-12.0f, 12.0f, correction);
+        correction = juce::jlimit(-kAutoEqMaxCorr, kAutoEqMaxCorr, correction);
 
-        // Korrektur für Visualisierung speichern
         processorRef.targetCorrections[i] = correction;
 
         DBG("Band " + juce::String(i) + " (" + juce::String(eqFrequencies[i]) + " Hz): "
             + juce::String(correction, 2) + " dB");
     }
+
 }
 
 //==============================================================================

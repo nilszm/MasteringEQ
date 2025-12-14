@@ -80,7 +80,7 @@ private:
 
     void drawTargetPoints(juce::Graphics& g);
 
-    // ============================================================================
+// ============================================================================
 // Diese Funktionsdeklarationen in PluginEditor.h einfügen (private Bereich):
 // ============================================================================
 
@@ -129,6 +129,10 @@ private:
     // Auto-EQ Funktion
     void applyAutoEQ();
     void drawTargetEQCurve(juce::Graphics& g);
+    std::vector<float> calculateResidualsAligned(
+        const std::vector<AudioPluginAudioProcessor::SpectrumPoint>& spectrum,
+        float offsetDb);
+
 
     // Hilfsfunktionen
     float findReferenceLevel(float frequency) const;
@@ -226,7 +230,7 @@ private:
 
     // Für Spektrum Smoothing (Ableton Standard)
     std::vector<float> smoothedLevels;
-    static constexpr float smoothingFactor = 0.8f;
+    static constexpr float smoothingFactor = 0.95f;
 
     // Räumliches Smoothing für glatteres Spektrum
     std::vector<float> applySpatialSmoothing(const std::vector<float>& levels, int windowSize = 3);

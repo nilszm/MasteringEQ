@@ -257,6 +257,10 @@ bool AudioPluginAudioProcessor::isBusesLayoutSupported(const BusesLayout& layout
 // Audio-Block verarbeiten
 void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
+    // Input Gain anwenden
+    float inputGainDb = apvts.getRawParameterValue("inputGain")->load();
+    float inputGainLinear = juce::Decibels::decibelsToGain(inputGainDb);
+
     juce::ignoreUnused(midiMessages);
     updateFilters(); // Sicherstellen, dass Filter auf aktuelle Parameter reagieren
     juce::ScopedNoDenormals noDenormals;
@@ -283,8 +287,9 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
 
             for (auto i = 0; i < numSamples; ++i)
             {
-                float monoSample = (leftData[i] + rightData[i]) * 0.5f;
+                float monoSample = ((leftData[i] + rightData[i]) * 0.5f) * inputGainLinear;
                 pushNextSampleIntoPreEQFifo(monoSample);
+
             }
         }
         else if (numChannels == 1)
@@ -292,13 +297,10 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
             // Mono-Input: direkt verwenden
             auto* channelData = buffer.getReadPointer(0);
             for (auto i = 0; i < numSamples; ++i)
-                pushNextSampleIntoPreEQFifo(channelData[i]);
+                pushNextSampleIntoPreEQFifo(channelData[i] * inputGainLinear);
+
         }
     }
-
-    // Input Gain anwenden
-    float inputGainDb = apvts.getRawParameterValue("inputGain")->load();
-    float inputGainLinear = juce::Decibels::decibelsToGain(inputGainDb);
 
     for (int channel = 0; channel < totalNumInputChannels; ++channel)
     {
@@ -691,7 +693,7 @@ void AudioPluginAudioProcessor::loadReferenceCurve(const juce::String& filename)
     // Von der "build" Ebene aus laden
     juce::File refFile = refFileBase
         .getChildFile("ReferenceCurves")
-        .getChildFile(filename);
+        .getChildFile(filename);a
 
     // Inhalt von JSON in String laden
     juce::String fileContent = refFile.loadFileAsString();
