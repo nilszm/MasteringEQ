@@ -51,6 +51,8 @@ juce_add_plugin(${PROJECT_NAME}
         PRODUCT_NAME "TapPluginTemplate"        
 )
 
+juce_generate_juce_header(${PROJECT_NAME})
+
 # How we want our SourceFiles to appear in our IDE
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${SourceFiles})
 
@@ -71,6 +73,7 @@ target_link_libraries(${PROJECT_NAME}
         juce::juce_analytics
         juce::juce_audio_basics
         juce::juce_audio_devices
+        juce::juce_audio_formats
         juce::juce_core
         juce::juce_data_structures
         juce::juce_graphics

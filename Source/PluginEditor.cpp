@@ -9,9 +9,15 @@
  * - Layout-Management für alle Komponenten
  */
 
+#include <JuceHeader.h>
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <algorithm>
 #include <limits>
+#include <complex>
+#include <cstdint>
+#include <cstring>
+#include <cmath>
 
  //==============================================================================
  //                           Max-Correction
@@ -25,7 +31,7 @@ namespace
 
     // Fixe Y-Skalierung für Referenz-Ansicht (Spektrumansicht)
     constexpr float kRefViewMinDb = -100.0f;  // unten
-    constexpr float kRefViewMaxDb = -45.0f;  // oben
+    constexpr float kRefViewMaxDb = -35.0f;  // oben
 
     // Rand-Fade: Bass & Air entschärfen
     static float edgeWeight(float f)
@@ -201,6 +207,7 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor(AudioPluginAudi
     setupEQSliders();
     setupQKnobs();
     setupInputGainSlider();
+    setupLoadReferenceButton();
 }
 
 /**
@@ -267,6 +274,307 @@ void AudioPluginAudioProcessorEditor::initializeWindow()
     setSize(1000, 690);
     setResizable(false, false);
 }
+
+void AudioPluginAudioProcessorEditor::setupLoadReferenceButton()
+{
+    loadReferenceButton.setButtonText("Referenz laden");
+    loadReferenceButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
+
+    loadReferenceButton.onClick = [this]
+        {
+            if (referenceAnalysisRunning)
+                return;
+
+            // FileChooser muss als Member existieren (sonst wird Callback nie ausgeführt)
+            referenceFileChooser = std::make_unique<juce::FileChooser>(
+                "Referenztrack wählen",
+                juce::File{},
+                "*.wav;*.aiff;*.aif;*.mp3"
+            );
+
+            auto flags = juce::FileBrowserComponent::openMode
+                | juce::FileBrowserComponent::canSelectFiles;
+
+            referenceFileChooser->launchAsync(flags, [this](const juce::FileChooser& chooser)
+                {
+                    const juce::File file = chooser.getResult();
+                    referenceFileChooser.reset(); // aufräumen
+
+                    if (!file.existsAsFile())
+                        return;
+
+                    // UI: Busy State
+                    referenceAnalysisRunning = true;
+                    loadReferenceButton.setEnabled(false);
+                    loadReferenceButton.setButtonText("Analysiere...");
+
+                    // SafePointer schützt vor Crashes wenn Editor geschlossen wird
+                    juce::Component::SafePointer<AudioPluginAudioProcessorEditor> safeThis(this);
+
+                    struct Job : public juce::ThreadPoolJob
+                    {
+                        Job(juce::Component::SafePointer<AudioPluginAudioProcessorEditor> s,
+                            AudioPluginAudioProcessor& p,
+                            juce::File f)
+                            : juce::ThreadPoolJob("ReferenceAnalysisJob"), safeEditor(s), processor(p), file(std::move(f)) {}
+
+                        JobStatus runJob() override
+                        {
+                            // Analyse (CPU-heavy) -> hier rein
+                            auto bands = analyseFileToReferenceBands(file);
+
+                            juce::MessageManager::callAsync([safe = safeEditor, bands = std::move(bands)]() mutable
+                                {
+                                    if (safe == nullptr)
+                                        return;
+
+                                    // Ergebnis in Processor schreiben + UI freigeben
+                                    safe->processorRef.referenceBands = std::move(bands);
+                                    safe->processorRef.hasTargetCorrections = false; // optional: Zielkurve zurücksetzen
+
+                                    safe->referenceAnalysisRunning = false;
+                                    safe->loadReferenceButton.setEnabled(true);
+                                    safe->loadReferenceButton.setButtonText("Referenz laden");
+
+                                    safe->repaint();
+                                });
+
+                            return jobHasFinished;
+                        }
+
+                        // ---- Kern: Datei -> ReferenceBands ----
+                        static std::vector<AudioPluginAudioProcessor::ReferenceBand>
+                            analyseFileToReferenceBands(const juce::File& f)
+                        {
+                            std::vector<AudioPluginAudioProcessor::ReferenceBand> out;
+
+                            juce::AudioFormatManager fm;
+                            fm.registerBasicFormats();
+
+                            std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(f));
+                            if (!reader)
+                                return out;
+
+                            const double sr = reader->sampleRate > 0.0 ? reader->sampleRate : 48000.0;
+                            const int64 totalSamples = reader->lengthInSamples;
+                            const int numCh = (int)reader->numChannels;
+
+                            // FFT-Settings (offline)
+                            constexpr int fftOrder = 12;               // 4096
+                            constexpr int fftSize = 1 << fftOrder;
+                            constexpr int hopSize = fftSize / 2;      // 50% overlap
+
+                            juce::dsp::FFT fft(fftOrder);
+                            juce::dsp::WindowingFunction<float> win(fftSize, juce::dsp::WindowingFunction<float>::hann);
+
+                            std::vector<float> mono((size_t)fftSize, 0.0f);
+                            std::vector<float> fftData((size_t)2 * fftSize, 0.0f);
+
+                            // Wir sammeln pro EQ-Band viele dB-Werte -> später P10/Median/P90
+                            constexpr float bandFreqs[31] =
+                            {
+                                20, 25, 31.5f, 40, 50, 63, 80, 100, 125, 160,
+                                200, 250, 315, 400, 500, 630, 800, 1000, 1250, 1600,
+                                2000, 2500, 3150, 4000, 5000, 6300, 8000, 10000, 12500, 16000, 20000
+                            };
+
+                            std::array<std::vector<float>, 31> bandDbValues;
+                            for (auto& v : bandDbValues) v.reserve(4096);
+
+                            auto percentile = [](std::vector<float>& v, float p)
+                                {
+                                    if (v.empty()) return DisplayScale::minDb;
+                                    std::sort(v.begin(), v.end());
+                                    const float pos = p * (float)(v.size() - 1);
+                                    const int i0 = (int)std::floor(pos);
+                                    const int i1 = (int)std::ceil(pos);
+                                    if (i0 == i1) return v[(size_t)i0];
+                                    const float t = pos - (float)i0;
+                                    return v[(size_t)i0] + t * (v[(size_t)i1] - v[(size_t)i0]);
+                                };
+
+                            auto hzToBin = [&](float hz)
+                                {
+                                    const int bin = (int)std::round(hz * (float)fftSize / (float)sr);
+                                    return juce::jlimit(0, fftSize / 2, bin);
+                                };
+
+                            // Bandbreite 1/3 Okt: Grenzen = f * 2^(±1/6)
+                            const float bandEdge = std::pow(2.0f, 1.0f / 6.0f);
+
+                            juce::AudioBuffer<float> temp(numCh, (int)juce::jmin<int64>(totalSamples, fftSize));
+
+                            int64 readPos = 0;
+                            std::vector<float> overlap((size_t)fftSize, 0.0f);
+                            bool haveOverlap = false;
+
+                            while (readPos < totalSamples)
+                            {
+                                const int toRead = (int)juce::jmin<int64>((int64)hopSize, totalSamples - readPos);
+                                temp.setSize(numCh, toRead, false, false, true);
+                                reader->read(&temp, 0, toRead, readPos, true, true);
+
+                                // frame bauen (overlap-add)
+                                if (!haveOverlap)
+                                {
+                                    std::fill(overlap.begin(), overlap.end(), 0.0f);
+                                    haveOverlap = true;
+                                }
+
+                                // shift left um hopSize
+                                std::memmove(overlap.data(), overlap.data() + hopSize, sizeof(float) * (fftSize - hopSize));
+
+                                // hinten neue Samples rein (mono)
+                                for (int i = 0; i < hopSize; ++i)
+                                {
+                                    float s = 0.0f;
+                                    if (i < toRead)
+                                    {
+                                        for (int ch = 0; ch < numCh; ++ch)
+                                            s += temp.getSample(ch, i);
+                                        s /= (float)juce::jmax(1, numCh);
+                                    }
+                                    overlap[(size_t)(fftSize - hopSize + i)] = s;
+                                }
+
+                                // window + FFT input
+                                std::copy(overlap.begin(), overlap.end(), mono.begin());
+                                win.multiplyWithWindowingTable(mono.data(), fftSize);
+
+                                std::fill(fftData.begin(), fftData.end(), 0.0f);
+                                std::copy(mono.begin(), mono.end(), fftData.begin());
+
+                                fft.performFrequencyOnlyForwardTransform(fftData.data());
+
+                                // pro Band: mags im Bandbereich mitteln -> dB speichern
+                                for (int b = 0; b < 31; ++b)
+                                {
+                                    const float f0 = bandFreqs[b];
+                                    const float fLo = juce::jmax(20.0f, f0 / bandEdge);
+                                    const float fHi = juce::jmin(20000.0f, f0 * bandEdge);
+
+                                    const int binLo = hzToBin(fLo);
+                                    const int binHi = hzToBin(fHi);
+
+                                    float sum = 0.0f;
+                                    int cnt = 0;
+
+                                    for (int k = binLo; k <= binHi; ++k)
+                                    {
+                                        sum += fftData[(size_t)k];
+                                        ++cnt;
+                                    }
+
+                                    const float magRaw = (cnt > 0) ? (sum / (float)cnt) : 0.0f;
+
+                                    // Normalisierung: JUCE FFT Magnitude ist größenabhängig.
+                                    // Sehr brauchbarer Start: auf fftSize skalieren (single-sided grob: *2/fftSize)
+                                    const float mag = magRaw * (2.0f / (float)fftSize);
+
+                                    const float db = juce::Decibels::gainToDecibels(mag, DisplayScale::minDb);
+                                    bandDbValues[b].push_back(juce::jlimit(DisplayScale::minDb, 0.0f, db));
+                                }
+
+                                readPos += toRead;
+                            }
+
+                            out.reserve(31);
+                            for (int b = 0; b < 31; ++b)
+                            {
+                                auto v = std::move(bandDbValues[b]);
+
+                                AudioPluginAudioProcessor::ReferenceBand band;
+                                band.freq = bandFreqs[b];
+                                band.p10 = percentile(v, 0.20f);
+                                band.median = percentile(v, 0.50f);
+                                band.p90 = percentile(v, 0.80f);
+                                out.push_back(band);
+                            }
+                            {
+                                const int windowSize = 5;
+                                const int passes = 2;
+
+                                std::vector<float> med;
+                                med.reserve(out.size());
+                                for (const auto& b : out)
+                                    med.push_back(b.median);
+
+                                auto smooth = [&](std::vector<float> v)
+                                    {
+                                        if ((int)v.size() < 3 || windowSize < 3) return v;
+
+                                        std::vector<float> cur = v;
+                                        std::vector<float> tmp(v.size());
+                                        const int half = windowSize / 2;
+
+                                        for (int pass = 0; pass < passes; ++pass)
+                                        {
+                                            for (int i = 0; i < (int)cur.size(); ++i)
+                                            {
+                                                double sum = 0.0;
+                                                int cnt = 0;
+                                                for (int j = -half; j <= half; ++j)
+                                                {
+                                                    const int idx = i + j;
+                                                    if (idx >= 0 && idx < (int)cur.size())
+                                                    {
+                                                        sum += cur[(size_t)idx];
+                                                        ++cnt;
+                                                    }
+                                                }
+                                                tmp[(size_t)i] = (cnt > 0) ? (float)(sum / (double)cnt) : cur[(size_t)i];
+                                            }
+                                            cur.swap(tmp);
+                                        }
+                                        return cur;
+                                    };
+
+                                auto medSmoothed = smooth(med);
+
+                                for (size_t i = 0; i < out.size(); ++i)
+                                    out[i].median = medSmoothed[i];
+                            }
+
+                            {
+                                constexpr float targetMidMedianDb = -60.0f;
+
+                                std::vector<float> mids;
+                                mids.reserve(out.size());
+
+                                for (const auto& b : out)
+                                    if (b.freq >= 50.0f && b.freq <= 10000.0f)
+                                        mids.push_back(b.median);
+
+                                if (!mids.empty())
+                                {
+                                    std::sort(mids.begin(), mids.end());
+                                    const float midMedian = mids[mids.size() / 2];
+
+                                    const float shift = targetMidMedianDb - midMedian;
+
+                                    for (auto& b : out)
+                                    {
+                                        b.p10 += shift;
+                                        b.median += shift;
+                                        b.p90 += shift;
+                                    }
+                                }
+                            }
+                            return out;
+                        }
+
+                        juce::Component::SafePointer<AudioPluginAudioProcessorEditor> safeEditor;
+                        AudioPluginAudioProcessor& processor;
+                        juce::File file;
+                    };
+
+                    referenceAnalysisPool.addJob(new Job(safeThis, processorRef, file), true);
+                });
+        };
+
+    addAndMakeVisible(loadReferenceButton);
+}
+
 
 /**
  * @brief Konfiguriert das Genre-Dropdown-Menü.
@@ -950,6 +1258,7 @@ void AudioPluginAudioProcessorEditor::layoutTopBar(juce::Rectangle<int>& area)
 
     // Alle Controls mit festen Positionen
     genreErkennenButton.setBounds(10, 5, 200, 30);
+    loadReferenceButton.setBounds(560, 5, 140, 30);
     eqCurveToggleButton.setBounds(220, 5, 150, 30);
     warningLabel.setBounds(380, 5, 320, 30);
     genreBox.setBounds(710, 5, 220, 30);

@@ -1,8 +1,8 @@
 #pragma once
 
+#pragma once
+#include <JuceHeader.h>
 #include "PluginProcessor.h"
-#include <juce_gui_basics/juce_gui_basics.h>
-#include <complex>
 
 //==============================================================================
 class AudioPluginAudioProcessorEditor : public juce::AudioProcessorEditor,
@@ -23,6 +23,7 @@ private:
     void setupGenreDropdown();
     void setupWarningLabel();
     void setupMeasurementButton();
+    void setupLoadReferenceButton();
     void setupResetButton();
     void setupEQCurveToggle();
     void setupEQSliders();
@@ -162,6 +163,19 @@ private:
 
     // Button für Genre erkennen
     juce::TextButton genreErkennenButton;
+
+    // Button für Referenz Laden
+    juce::TextButton loadReferenceButton;
+
+    // Async FileChooser am Leben halten
+    std::unique_ptr<juce::FileChooser> referenceFileChooser;
+
+    // Background-Job Pool (1 Thread reicht)
+    juce::ThreadPool referenceAnalysisPool{ 1 };
+
+    // UI-Status
+    bool referenceAnalysisRunning = false;
+
 
     // Button für Reset
     juce::TextButton resetButton;

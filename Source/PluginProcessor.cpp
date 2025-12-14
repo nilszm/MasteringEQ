@@ -693,7 +693,7 @@ void AudioPluginAudioProcessor::loadReferenceCurve(const juce::String& filename)
     // Von der "build" Ebene aus laden
     juce::File refFile = refFileBase
         .getChildFile("ReferenceCurves")
-        .getChildFile(filename);a
+        .getChildFile(filename);
 
     // Inhalt von JSON in String laden
     juce::String fileContent = refFile.loadFileAsString();

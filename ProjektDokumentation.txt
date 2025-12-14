@@ -1,2 +1,143 @@
 - Kammfilter beim EQ - Spielt das eine Rolle?
 - dB Darstellung in FS oder gemappt
+
+
+
+Anzeige / Skalierung (das war der große Fix)
+
+Fixe Y-Skalierung für die Referenz-/Spektrumansicht eingeführt (statt dynamisch/auto):
+
+kRefViewMinDb = -100.0f und kRefViewMaxDb = -45.0f
+
+Wird genutzt in drawSpectrumArea() und calculateSpectrumPoints() (wenn showEQCurve == false)
+
+Ansichtsabhängige Skalierung:
+
+EQ-Ansicht nutzt -12…+12 dB
+
+Referenz-/Spektrumansicht nutzt kRefViewMinDb…kRefViewMaxDb
+
+umgesetzt in calculateSpectrumPoints() über:
+
+const float displayMinDb = showEQCurve ? -12.0f : kRefViewMinDb;
+const float displayMaxDb = showEQCurve ? 12.0f : kRefViewMaxDb;
+
+Messkurve / “Trägheit” (zeitliches Smoothing)
+
+Zeitliches Smoothing (Exponential Smoothing) für die hellblaue Spektrumkurve ist klar als Stellschraube vorhanden:
+
+smoothedLevels als Puffer
+
+smoothingFactor als Konstante (bei dir aktuell 0.95f)
+
+angewendet in calculateSpectrumPoints():
+
+smoothedLevels[i] = smoothedLevels[i] * smoothingFactor
+                  + point.level * (1.0f - smoothingFactor);
+
+
+Ergebnis: du kannst die Kurve “träge” machen, indem du smoothingFactor erhöhst (z.B. 0.92–0.97 je nach Geschmack).
+(Genau das war ja dein Wunsch: weniger “springen”, besser ablesbar.)
+
+Referenz-Ansicht: Offset-Alignment (Kurve sitzt stabiler)
+
+Automatische Offset-Berechnung, damit Messkurve und Referenzkurve sinnvoll übereinander liegen:
+
+Funktion: computeReferenceViewOffsetDb(...)
+
+macht Median-Offset aus Differenzen (50 Hz – 10 kHz)
+
+Offset wird gecapped: juce::jlimit(-36.0f, 36.0f, median)
+
+Offset wird geglättet, damit er nicht jittert:
+
+in timerCallback():
+
+const float a = 0.90f;
+referenceViewOffsetDbSmoothed = a * referenceViewOffsetDbSmoothed + (1.0f - a) * targetOffset;
+
+Interpolation / “saubere Werte” statt Stufen
+
+Logarithmische Interpolation für Mess- und Referenzwerte eingeführt:
+
+sampleLogInterpolatedSpectrum(...)
+
+sampleLogInterpolatedReferenceMedian(...)
+
+Damit wird z.B. bei findReferenceLevel() / findMeasuredLevel() nicht nur der nächste Punkt genommen, sondern sinnvoll interpoliert.
+
+Messung / Datenfluss (Pre-EQ vs Post-EQ)
+
+Es gibt jetzt zwei Spektren:
+
+spectrumArray = Post-EQ (Anzeige)
+
+preEQSpectrumArray = Pre-EQ (Messung / Auto-EQ-Grundlage)
+
+Dazu gehören getrennte FIFOs/FFTs:
+
+pushNextSampleIntoFifo() + updateSpectrumArray() (Post-EQ)
+
+pushNextSampleIntoPreEQFifo() + updatePreEQSpectrumArray() (Pre-EQ)
+
+Messung speichert Snapshots:
+
+measurementBuffer, addMeasurementSnapshot(), getAveragedSpectrum()
+
+Auto-EQ: Korrekturkurve (zielgerichteter & “Mastering-tauglicher”)
+
+Auto-EQ berechnet jetzt Residuals gegen Referenz, inklusive:
+
+Offset-Alignment (calculateResidualsAligned(..., offsetDb))
+
+Gate gegen zu leise Bereiche: gateDb = DisplayScale::minDb + 10.0f
+
+Rand-Fade (Bass/Air entschärfen): edgeWeight(freq)
+
+Breitband-Smoothing für die Auto-EQ-Residuals:
+
+smoothMovingAverage(residuals, 5, 1)
+
+Korrektur wird begrenzt:
+
+kAutoEqMaxCorr = 12.0f → clamp auf ±12 dB
+
+Ergebnis wird nur als Zielkurve gespeichert (keine “automatischen Slider Moves”):
+
+processorRef.targetCorrections[i] = correction;
+
+processorRef.hasTargetCorrections = true;
+
+EQ-Ansicht / Toggle / Darstellung
+
+Umschalt-Button zwischen:
+
+“EQ Ansicht” ↔ “Referenz Ansicht”
+
+umgesetzt in setupEQCurveToggle() (Buttontext abhängig von showEQCurve)
+
+EQ-Kurve wird als kombinierter Frequenzgang der 31 Bänder berechnet:
+
+Log-Frequenzsampling (2000 Punkte)
+
+peakingEQComplex() (RBJ Cookbook-Style)
+
+Summation in dB
+
+Darstellung mit 0 dB Linie + Füllung
+
+Target-Korrekturkurve wird in EQ-Ansicht als gestrichelte Lime-Kurve + Punkte gezeichnet.
+
+Layout / Zeichenpipeline (wichtige Strukturänderungen)
+
+paint() ist sauber in Draw-Funktionen aufgeteilt:
+
+drawTopBar(), drawBackground(), drawSpectrumArea(), drawFrequencyGrid(), drawEQAreas(), drawEQLabels()
+
+spectrumInnerArea wird aus den äußeren Slidern abgeleitet (20 Hz bis 20 kHz), damit die Kurve perfekt aligned:
+
+calculateSpectrumInnerArea()
+
+Clipping fürs Spektrum/EQ im inneren Bereich:
+
+g.reduceClipRegion(spectrumInnerArea);
