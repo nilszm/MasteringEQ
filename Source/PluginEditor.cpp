@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
+#include <array>
 
  //==============================================================================
  //                           Max-Correction
@@ -45,6 +46,22 @@ namespace
             return juce::jlimit(0.0f, 1.0f, juce::jmap(f, 16000.0f, 20000.0f, 1.0f, 0.0f));
 
         return 1.0f;
+    }
+
+    static inline bool isFinite(float x) noexcept
+    {
+        return std::isfinite(x);
+    }
+
+    static inline float finiteOr(float x, float fallback) noexcept
+    {
+        return std::isfinite(x) ? x : fallback;
+    }
+
+    static inline float finiteClamp(float x, float lo, float hi, float fallback = 0.0f) noexcept
+    {
+        if (!std::isfinite(x)) return fallback;
+        return juce::jlimit(lo, hi, x);
     }
 
     // Breitband-Smoothing (Moving Average)
@@ -81,6 +98,7 @@ namespace
 
         return cur;
     }
+
     static void postProcessReferenceBands(std::vector<AudioPluginAudioProcessor::ReferenceBand>& bands)
     {
         if (bands.size() < 3) return;
@@ -268,6 +286,8 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor(AudioPluginAudi
  */
 AudioPluginAudioProcessorEditor::~AudioPluginAudioProcessorEditor()
 {
+    referenceAnalysisPool.removeAllJobs(true, 2000);
+    autoEqPool.removeAllJobs(true, 2000);
 }
 
 //==============================================================================
@@ -745,9 +765,8 @@ void AudioPluginAudioProcessorEditor::setupMeasurementButton()
                 // Auto-EQ berechnen wenn Referenzkurve vorhanden
                 if (!processorRef.referenceBands.empty())
                 {
-                    applyAutoEQ();
+                    startAutoEqAsync();
                 }
-                else
                 {
                     DBG("Keine Referenzkurve ausgewählt!");
                 }
@@ -1883,6 +1902,516 @@ std::complex<float> AudioPluginAudioProcessorEditor::peakingEQComplex(
 }
 
 //==============================================================================
+//                              Gains-Fit
+//==============================================================================
+
+namespace
+{
+    // Log-Interpolation: 31 Bandpunkte -> Zielkurve auf beliebigen Frequenzen
+    static float interpLogCurveDb(const std::vector<float>& bandFreqs,
+        const std::vector<float>& bandDb,
+        float fHz)
+    {
+        jassert(bandFreqs.size() == bandDb.size());
+        if (bandFreqs.empty()) return 0.0f;
+
+        if (fHz <= bandFreqs.front()) return bandDb.front();
+        if (fHz >= bandFreqs.back())  return bandDb.back();
+
+        const float lf = std::log10(fHz);
+
+        for (size_t i = 1; i < bandFreqs.size(); ++i)
+        {
+            if (bandFreqs[i] >= fHz)
+            {
+                const float f0 = bandFreqs[i - 1];
+                const float f1 = bandFreqs[i];
+                const float l0 = std::log10(f0);
+                const float l1 = std::log10(f1);
+
+                const float t = (lf - l0) / (l1 - l0);
+                return bandDb[i - 1] + t * (bandDb[i] - bandDb[i - 1]);
+            }
+        }
+
+        return bandDb.back();
+    }
+
+    // Berechnet EQ-Response in dB (Summe der log-Magnitudes) für gegebene Gains+Qs
+    static void computeEQResponseDb(const std::vector<float>& freqs,
+        const std::array<float, 31>& gainsDb,
+        const std::array<float, 31>& Qs,
+        float sampleRate,
+        std::vector<float>& outDb,
+        const std::vector<float>& eqFreqs)
+    {
+        outDb.assign(freqs.size(), 0.0f);
+
+        for (size_t k = 0; k < freqs.size(); ++k)
+        {
+            const float f = freqs[k];
+            double sumDb = 0.0;
+
+            for (int i = 0; i < 31; ++i)
+            {
+                const float gRaw = gainsDb[(size_t)i];
+                if (std::abs(gRaw) <= 0.0001f)
+                    continue;
+
+                // --- Guards ---
+                float sr = sampleRate;
+                if (!(sr > 0.0f)) sr = 48000.0f;
+
+                const float nyq = 0.5f * sr;
+
+                float f0 = eqFreqs[(size_t)i];
+                float Q = Qs[(size_t)i];
+
+                // Nyquist-Clamp (sehr wichtig bei 20k Band + niedriger SR)
+                f0 = juce::jlimit(20.0f, nyq * 0.49f, f0);
+                float f = freqs[k];
+                f = juce::jlimit(20.0f, nyq * 0.49f, f);
+
+                Q = juce::jmax(0.001f, Q);
+
+                // Gain clamp + finite
+                const float g = finiteClamp(gRaw, -12.0f, 12.0f, 0.0f);
+
+                const float A = std::pow(10.0f, g / 40.0f);
+
+                const float w0 = juce::MathConstants<float>::twoPi * f0 / sr;
+                const float w = juce::MathConstants<float>::twoPi * f / sr;
+
+                const float alpha = std::sin(w0) / (2.0f * Q);
+
+                float b0 = 1.0f + alpha * A;
+                float b1 = -2.0f * std::cos(w0);
+                float b2 = 1.0f - alpha * A;
+                float a0 = 1.0f + alpha / A;
+                float a1 = -2.0f * std::cos(w0);
+                float a2 = 1.0f - alpha / A;
+
+                // Normieren
+                b0 /= a0; b1 /= a0; b2 /= a0;
+                a1 /= a0; a2 /= a0;
+
+                std::complex<float> z1(std::cos(-w), std::sin(-w));
+                std::complex<float> z2(std::cos(-2.0f * w), std::sin(-2.0f * w));
+
+                std::complex<float> num = b0 + b1 * z1 + b2 * z2;
+                std::complex<float> den = 1.0f + a1 * z1 + a2 * z2;
+
+                const float denMag = std::abs(den);
+                if (!std::isfinite(denMag) || denMag < 1.0e-12f)
+                    continue; // Filterbeitrag ignorieren statt NaN zu erzeugen
+
+                float mag = std::abs(num / den);
+                if (!std::isfinite(mag)) mag = 1.0f;
+                mag = std::max(1.0e-8f, mag);
+
+                float magDb = 20.0f * std::log10(mag);
+                if (!std::isfinite(magDb)) magDb = 0.0f;
+
+                sumDb += (double)magDb;
+            }
+
+
+            outDb[k] = (float)sumDb;
+        }
+    }
+
+    // Löser für symmetrisches, positiv definites LGS (Cholesky) – n ist klein (31)
+    static bool solveSPD_Cholesky(std::vector<double>& A, std::vector<double>& b, int n)
+    {
+        // A ist n*n in row-major
+        // Cholesky: A = L*L^T (wir speichern L in A)
+        for (int i = 0; i < n; ++i)
+        {
+            for (int j = 0; j <= i; ++j)
+            {
+                double sum = A[(size_t)i * n + j];
+
+                for (int k = 0; k < j; ++k)
+                    sum -= A[(size_t)i * n + k] * A[(size_t)j * n + k];
+
+                if (i == j)
+                {
+                    if (sum <= 1.0e-12)
+                        return false;
+
+                    A[(size_t)i * n + j] = std::sqrt(sum);
+                }
+                else
+                {
+                    A[(size_t)i * n + j] = sum / A[(size_t)j * n + j];
+                }
+            }
+
+            // oberen Teil nicht nötig
+            for (int j = i + 1; j < n; ++j)
+                A[(size_t)i * n + j] = 0.0;
+        }
+
+        // Forward solve: L*y = b
+        std::vector<double> y((size_t)n, 0.0);
+        for (int i = 0; i < n; ++i)
+        {
+            double sum = b[(size_t)i];
+            for (int k = 0; k < i; ++k)
+                sum -= A[(size_t)i * n + k] * y[(size_t)k];
+
+            y[(size_t)i] = sum / A[(size_t)i * n + i];
+        }
+
+        // Backward solve: L^T*x = y  (x wird in b zurückgeschrieben)
+        for (int i = n - 1; i >= 0; --i)
+        {
+            double sum = y[(size_t)i];
+            for (int k = i + 1; k < n; ++k)
+                sum -= A[(size_t)k * n + i] * b[(size_t)k];
+
+            b[(size_t)i] = sum / A[(size_t)i * n + i];
+        }
+
+        return true;
+    }
+
+    // Stufe 1 Fit: Gauss-Newton nur für Gains, Q fix
+    static std::array<float, 31> fitGainsStage1(const std::vector<float>& freqs,
+        const std::vector<float>& targetDb,
+        const std::array<float, 31>& Qs,
+        float sampleRate,
+        const std::vector<float>& eqFreqs)
+    {
+        std::array<float, 31> gains{};
+        gains.fill(0.0f);
+
+        const int N = (int)freqs.size();
+        const int M = 31;
+
+        std::vector<float> curDb, plusDb, minusDb;
+        std::vector<double> r((size_t)N, 0.0);
+
+        constexpr float deltaDb = 0.25f;     // finite difference step
+        constexpr int iters = 8;             // 6–10 ist meist genug
+        constexpr double damping = 1e-2;     // stabilisiert (Tikhonov)
+
+        for (int iter = 0; iter < iters; ++iter)
+        {
+            // current response
+            computeEQResponseDb(freqs, gains, Qs, sampleRate, curDb, eqFreqs);
+
+            // residual r = target - current
+            for (int k = 0; k < N; ++k)
+                r[(size_t)k] = (double)targetDb[(size_t)k] - (double)curDb[(size_t)k];
+
+            // Normal equations: (J^T J + λI) * dg = J^T r
+            std::vector<double> AtA((size_t)M * M, 0.0);
+            std::vector<double> Atb((size_t)M, 0.0);
+
+            // Für jede Spalte i: Jacobian per finite diff
+            for (int i = 0; i < M; ++i)
+            {
+                auto gPlus = gains;
+                auto gMinus = gains;
+                gPlus[(size_t)i] = juce::jlimit(-12.0f, 12.0f, gPlus[(size_t)i] + deltaDb);
+                gMinus[(size_t)i] = juce::jlimit(-12.0f, 12.0f, gMinus[(size_t)i] - deltaDb);
+
+                computeEQResponseDb(freqs, gPlus, Qs, sampleRate, plusDb, eqFreqs);
+                computeEQResponseDb(freqs, gMinus, Qs, sampleRate, minusDb, eqFreqs);
+
+                // Ji[k] = d(curDb)/d(gain_i)
+                // Wir bauen AtA und Atb inkrementell
+                std::vector<double> Ji((size_t)N, 0.0);
+                const double denom = 1.0 / (2.0 * (double)deltaDb);
+
+                for (int k = 0; k < N; ++k)
+                    Ji[(size_t)k] = ((double)plusDb[(size_t)k] - (double)minusDb[(size_t)k]) * denom;
+
+                // Atb[i] += Σ Ji[k] * r[k]
+                double sumAtb = 0.0;
+                for (int k = 0; k < N; ++k)
+                    sumAtb += Ji[(size_t)k] * r[(size_t)k];
+                Atb[(size_t)i] = sumAtb;
+
+                // AtA[i,j] += Σ Ji[k]*Jj[k]
+                // -> wir brauchen Jj; für M=31 geht’s so:
+                for (int j = 0; j <= i; ++j)
+                {
+                    // Jj per finite diff erneut zu rechnen wäre teuer.
+                    // Trick: wir berechnen AtA "spaltenweise" nicht optimal.
+                    // Für Stufe 1 reicht aber Performance; M ist klein.
+                    // => Wir rechnen Jj ebenfalls kurz aus.
+                    auto gPlus2 = gains;
+                    auto gMinus2 = gains;
+                    gPlus2[(size_t)j] = juce::jlimit(-12.0f, 12.0f, gPlus2[(size_t)j] + deltaDb);
+                    gMinus2[(size_t)j] = juce::jlimit(-12.0f, 12.0f, gMinus2[(size_t)j] - deltaDb);
+
+                    std::vector<float> plusDb2, minusDb2;
+                    computeEQResponseDb(freqs, gPlus2, Qs, sampleRate, plusDb2, eqFreqs);
+                    computeEQResponseDb(freqs, gMinus2, Qs, sampleRate, minusDb2, eqFreqs);
+
+                    double sum = 0.0;
+                    for (int k = 0; k < N; ++k)
+                    {
+                        const double Jj = ((double)plusDb2[(size_t)k] - (double)minusDb2[(size_t)k]) * denom;
+                        sum += Ji[(size_t)k] * Jj;
+                    }
+
+                    AtA[(size_t)i * M + j] += sum;
+                    AtA[(size_t)j * M + i] += sum; // symmetrisch
+                }
+            }
+
+            // Damping auf Diagonale
+            for (int i = 0; i < M; ++i)
+                AtA[(size_t)i * M + i] += damping;
+
+            // Solve
+            auto Awork = AtA;
+            auto bwork = Atb;
+
+            if (!solveSPD_Cholesky(Awork, bwork, M))
+                break;
+
+            // Update gains
+            float maxStep = 0.0f;
+            for (int i = 0; i < M; ++i)
+            {
+                const float step = (float)bwork[(size_t)i];
+                maxStep = std::max(maxStep, std::abs(step));
+
+                float stepF = finiteOr((float)bwork[(size_t)i], 0.0f);
+
+                // Optional: Step begrenzen (stabilisiert den Solver extrem)
+                stepF = juce::jlimit(-3.0f, 3.0f, stepF);
+
+                const float newG = gains[(size_t)i] + stepF;
+                gains[(size_t)i] = finiteClamp(newG, -12.0f, 12.0f, 0.0f);
+            }
+
+            // Abbruch wenn kaum Änderung
+            if (maxStep < 0.02f)
+                break;
+        }
+
+        return gains;
+    }
+}
+
+static void applyGainsToApvts(AudioPluginAudioProcessor& proc,
+    const std::array<float, 31>& gainsDb)
+{
+    for (int i = 0; i < 31; ++i)
+    {
+        const juce::String paramID = "band" + juce::String(i);
+
+        if (auto* p = dynamic_cast<juce::RangedAudioParameter*>(proc.apvts.getParameter(paramID)))
+        {
+            const float clamped = juce::jlimit(-12.0f, 12.0f, gainsDb[(size_t)i]);
+
+            p->beginChangeGesture();
+            p->setValueNotifyingHost(p->convertTo0to1(clamped)); // <-- wichtig (Host/Automation-safe)
+            p->endChangeGesture();
+        }
+    }
+}
+
+void AudioPluginAudioProcessorEditor::startAutoEqAsync()
+{
+    // Schon am laufen? -> nichts tun
+    if (autoEqRunning.exchange(true))
+        return;
+
+    // UI "busy" (optional, aber hilfreich)
+    genreErkennenButton.setEnabled(false);
+    genreErkennenButton.setButtonText("Berechne...");
+    loadReferenceButton.setEnabled(false);
+    resetButton.setEnabled(false);
+    eqCurveToggleButton.setEnabled(false);
+
+    // WICHTIG: Daten KOPIEREN (Job darf später NICHT auf UI zugreifen)
+    const auto averagedSpectrumCopy = processorRef.getAveragedSpectrum();
+    const auto referenceBandsCopy = processorRef.referenceBands;
+
+    std::array<float, 31> qCopy{};
+    for (int i = 0; i < 31; ++i)
+        qCopy[(size_t)i] = (float)eqKnob[i].getValue(); // nur JETZT lesen (Message Thread)
+
+    std::array<float, 31> eqFreqCopy{};
+    for (int i = 0; i < 31; ++i)
+        eqFreqCopy[(size_t)i] = (float)eqFrequencies[(size_t)i];
+
+    float sr = (float)processorRef.getSampleRate();
+    if (!(sr > 0.0f))
+        sr = 48000.0f;
+
+    // SafePointer: falls Editor geschlossen wird während der Berechnung
+    juce::Component::SafePointer<AudioPluginAudioProcessorEditor> safeThis(this);
+
+    struct Job : public juce::ThreadPoolJob
+    {
+        Job(juce::Component::SafePointer<AudioPluginAudioProcessorEditor> s,
+            AudioPluginAudioProcessor& p,
+            std::vector<AudioPluginAudioProcessor::SpectrumPoint> spec,
+            std::vector<AudioPluginAudioProcessor::ReferenceBand> ref,
+            std::array<float, 31> q,
+            std::array<float, 31> eqF,
+            float sampleRate)
+            : juce::ThreadPoolJob("AutoEqJob"),
+            safeEditor(s), processor(p),
+            spectrum(std::move(spec)), reference(std::move(ref)),
+            qFixed(q), eqFreqs(eqF), sr(sampleRate) {
+        }
+
+        static float computeOffsetFromCopies(
+            const std::vector<AudioPluginAudioProcessor::SpectrumPoint>& spectrum,
+            const std::vector<AudioPluginAudioProcessor::ReferenceBand>& reference,
+            const std::array<float, 31>& eqFreqs)
+        {
+            if (spectrum.empty() || reference.empty())
+                return 0.0f;
+
+            std::vector<float> diffs;
+            diffs.reserve(31);
+
+            const float fMin = 50.0f;
+            const float fMax = 10000.0f;
+
+            for (int i = 0; i < 31; ++i)
+            {
+                const float f = eqFreqs[(size_t)i];
+                if (f < fMin || f > fMax) continue;
+
+                const float ref = sampleLogInterpolatedReferenceMedian(reference, f, DisplayScale::minDb);
+                const float meas = sampleLogInterpolatedSpectrum(spectrum, f, DisplayScale::minDb);
+                diffs.push_back(ref - meas);
+            }
+
+            if (diffs.empty())
+                return 0.0f;
+
+            std::nth_element(diffs.begin(), diffs.begin() + diffs.size() / 2, diffs.end());
+            const float median = diffs[diffs.size() / 2];
+            return juce::jlimit(-36.0f, 36.0f, median);
+        }
+
+        static std::vector<float> generateLogFrequenciesLocal(int numPoints, float minFreq, float maxFreq)
+        {
+            std::vector<float> out;
+            out.reserve((size_t)numPoints);
+
+            const float logMin = std::log10(minFreq);
+            const float logMax = std::log10(maxFreq);
+
+            for (int i = 0; i < numPoints; ++i)
+            {
+                const float t = (numPoints <= 1) ? 0.0f : (float)i / (float)(numPoints - 1);
+                const float lf = logMin + (logMax - logMin) * t;
+                out.push_back(std::pow(10.0f, lf));
+            }
+            return out;
+        }
+
+        JobStatus runJob() override
+        {
+            if (safeEditor == nullptr)
+                return jobHasFinished;
+
+            // --- HEAVY COMPUTE (kein GUI!) ---
+            const float offsetDb = computeOffsetFromCopies(spectrum, reference, eqFreqs);
+
+            // Residuals (31)
+            std::vector<float> residuals;
+            residuals.reserve(31);
+
+            for (int i = 0; i < 31; ++i)
+            {
+                const float f = eqFreqs[(size_t)i];
+
+                const float refLevel = sampleLogInterpolatedReferenceMedian(reference, f, DisplayScale::minDb);
+                float measLevel = sampleLogInterpolatedSpectrum(spectrum, f, DisplayScale::minDb);
+
+                const float gateDb = DisplayScale::minDb + 10.0f;
+                if (measLevel < gateDb) measLevel = gateDb;
+
+                measLevel += offsetDb;
+
+                float r = (refLevel - measLevel) * edgeWeight(f);
+                residuals.push_back(r);
+            }
+
+            // smoothing + amount
+            residuals = smoothMovingAverage(residuals, 5, 1);
+            for (auto& r : residuals)
+                r *= 1.0f; // kAutoEqAmount
+
+            // Fit (etwas kleiner -> weniger Freeze/CPU)
+            const int fitPoints = 350; // 250..400 ist sehr praxisnah
+            auto fitFreqs = generateLogFrequenciesLocal(fitPoints, 20.0f, 20000.0f);
+
+            std::vector<float> bandFreqs;
+            bandFreqs.reserve(31);
+            for (int i = 0; i < 31; ++i)
+                bandFreqs.push_back(eqFreqs[(size_t)i]);
+
+            std::vector<float> targetDb;
+            targetDb.reserve(fitFreqs.size());
+            for (auto f : fitFreqs)
+                targetDb.push_back(interpLogCurveDb(bandFreqs, residuals, f));
+
+            // Stufe 1 Fit
+            std::array<float, 31> fitted = fitGainsStage1(fitFreqs, targetDb, qFixed, sr, bandFreqs);
+
+            // --- zurück in GUI Thread ---
+            juce::MessageManager::callAsync([safe = safeEditor, fitted]() mutable
+                {
+                    if (safe == nullptr)
+                        return;
+
+                    for (int i = 0; i < 31; ++i)
+                        safe->processorRef.targetCorrections[i] = juce::jlimit(-12.0f, 12.0f, fitted[(size_t)i]);
+
+                    safe->processorRef.hasTargetCorrections = true;
+
+                    safe->autoEqRunning = false;
+                    applyGainsToApvts(safe->processorRef, fitted);
+
+                    // UI wieder freigeben
+                    safe->genreErkennenButton.setEnabled(true);
+                    safe->genreErkennenButton.setButtonText("Messung starten");
+                    safe->loadReferenceButton.setEnabled(true);
+                    safe->resetButton.setEnabled(true);
+                    safe->eqCurveToggleButton.setEnabled(true);
+
+                    safe->repaint();
+                });
+
+            return jobHasFinished;
+        }
+
+        juce::Component::SafePointer<AudioPluginAudioProcessorEditor> safeEditor;
+        AudioPluginAudioProcessor& processor;
+
+        std::vector<AudioPluginAudioProcessor::SpectrumPoint> spectrum;
+        std::vector<AudioPluginAudioProcessor::ReferenceBand> reference;
+
+        std::array<float, 31> qFixed{};
+        std::array<float, 31> eqFreqs{};
+        float sr = 48000.0f;
+    };
+
+    autoEqPool.addJob(new Job(safeThis,
+        processorRef,
+        averagedSpectrumCopy,
+        referenceBandsCopy,
+        qCopy,
+        eqFreqCopy,
+        sr),
+        true);
+}
+
+//==============================================================================
 //                       AUTO-EQ FUNKTIONEN
 //==============================================================================
 
@@ -1935,11 +2464,52 @@ void AudioPluginAudioProcessorEditor::applyAutoEQ()
 
     dbgMinMax("after amount", residuals);
 
-    // in targetCorrections speichern (Clamp macht applyCorrections)
-    applyCorrections(residuals, 0.0f);
+//======================
+//      Gains-Fit
+//======================
 
+// 1) Zielkurve (targetDb) auf dichtes Frequenzraster bringen
+    const int fitPoints = 600; // 400..1000 ist praxisnah, 2000 ist möglich aber langsamer
+    auto fitFreqs = generateLogFrequencies(fitPoints, 20.0f, 20000.0f);
 
+    // residuals ist dein 31er Ziel (an den eqFrequencies)
+    // -> daraus machen wir targetDb auf fitFreqs
+    std::vector<float> bandFreqs;
+    bandFreqs.reserve(31);
+    for (int i = 0; i < 31; ++i)
+        bandFreqs.push_back(eqFrequencies[i]);
+
+    std::vector<float> targetDb;
+    targetDb.reserve((size_t)fitFreqs.size());
+    for (auto f : fitFreqs)
+        targetDb.push_back(interpLogCurveDb(bandFreqs, residuals, f));
+
+    // 2) Q fest lassen (aktueller Knob-Stand)
+    std::array<float, 31> fixedQs;
+    for (int i = 0; i < 31; ++i)
+        fixedQs[(size_t)i] = (float)eqKnob[i].getValue();
+
+    // 3) SampleRate
+    float sr = (float)processorRef.getSampleRate();
+    if (sr <= 0.0f) sr = 48000.0f;
+
+    // 4) Fit berechnen: gives recommended slider gains
+    std::array<float, 31> fittedGains = fitGainsStage1(fitFreqs, targetDb, fixedQs, sr, bandFreqs);
+
+    // 5) Ergebnis in targetCorrections speichern (das sind jetzt "Slider-Gains", nicht nur Residual-Punkte)
+    for (int i = 0; i < 31; ++i)
+    {
+        const float g = fittedGains[(size_t)i];
+        processorRef.targetCorrections[i] = finiteClamp(g, -12.0f, 12.0f, 0.0f);
+    }
+
+    // Flag erst setzen, wenn die Daten sicher sind
     processorRef.hasTargetCorrections = true;
+
+
+    DBG("=== Auto-EQ Stufe 1 (Gains-Fit) abgeschlossen ===");
+    repaint();
+
 
     DBG("=== Auto-EQ Berechnung abgeschlossen (Kurve wird angezeigt) ===");
     repaint();
@@ -2175,7 +2745,7 @@ juce::Path AudioPluginAudioProcessorEditor::buildTargetPath()
     for (int i = 0; i < 31; ++i)
     {
         float freq = eqFrequencies[i];
-        float correction = processorRef.targetCorrections[i];
+        float correction = finiteClamp(processorRef.targetCorrections[i], -12.0f, 12.0f, 0.0f);
 
         // Koordinaten berechnen
         float normX = juce::mapFromLog10(freq, minFreq, maxFreq);
@@ -2237,7 +2807,7 @@ void AudioPluginAudioProcessorEditor::drawTargetPoints(juce::Graphics& g)
     for (int i = 0; i < 31; ++i)
     {
         float freq = eqFrequencies[i];
-        float correction = processorRef.targetCorrections[i];
+        float correction = finiteClamp(processorRef.targetCorrections[i], -12.0f, 12.0f, 0.0f);
 
         // Koordinaten berechnen
         float normX = juce::mapFromLog10(freq, minFreq, maxFreq);

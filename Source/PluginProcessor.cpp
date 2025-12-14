@@ -367,11 +367,11 @@ void AudioPluginAudioProcessor::pushNextSampleIntoFifo(float sample) noexcept
 {
     if (fifoIndex == fftSize)
     {
-        if (!nextFFTBlockReady)
+        if (!nextFFTBlockReady.load())
         {
             juce::zeromem(fftData, sizeof(fftData));
             memcpy(fftData, fifo, sizeof(fifo));
-            nextFFTBlockReady = true; // Signalisiert, dass FFT-Daten bereit sind
+            nextFFTBlockReady.store(true);
         }
         fifoIndex = 0;
     }
@@ -579,7 +579,7 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 void AudioPluginAudioProcessor::startMeasurement()
 {
     measurementBuffer.clear();
-    measuring = true;
+    measuring.store(true);
     DBG("Messung gestartet");
 }
 
@@ -587,7 +587,7 @@ void AudioPluginAudioProcessor::startMeasurement()
 // Messung stoppen
 void AudioPluginAudioProcessor::stopMeasurement()
 {
-    measuring = false;
+    measuring.store(false);
     DBG("Messung gestoppt - " + juce::String(measurementBuffer.size()) + " Snapshots gesammelt");
 }
 
@@ -596,7 +596,7 @@ void AudioPluginAudioProcessor::stopMeasurement()
 // WICHTIG: Verwendet jetzt preEQSpectrumArray statt spectrumArray!
 void AudioPluginAudioProcessor::addMeasurementSnapshot()
 {
-    if (measuring && !preEQSpectrumArray.empty())
+    if (measuring.load() && !preEQSpectrumArray.empty())
     {
         measurementBuffer.push_back(preEQSpectrumArray);
     }
@@ -689,7 +689,7 @@ void AudioPluginAudioProcessor::loadReferenceCurve(const juce::String& filename)
 
         refFileBase = refFileBase.getParentDirectory();
     }
-
+    
     // Von der "build" Ebene aus laden
     juce::File refFile = refFileBase
         .getChildFile("ReferenceCurves")

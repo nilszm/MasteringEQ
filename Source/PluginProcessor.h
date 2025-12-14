@@ -2,6 +2,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
+#include <atomic>
 
 namespace DisplayScale
 {
@@ -66,16 +67,16 @@ public:
     void getNextScopeData(float* destBuffer, int numPoints);
     void pushNextSampleIntoFifo(float sample) noexcept;       // Sample in FIFO speichern (Post-EQ)
     void updateSpectrumArray(double sampleRate);              // FFT durchführen und Spektrum berechnen
-    bool getNextFFTBlockReady() const { return nextFFTBlockReady; }
+    bool getNextFFTBlockReady() const { return nextFFTBlockReady.load(); }
     const float* getScopeData() const { return scopeData; }
     int getScopeSize() const { return scopeSize; }
-    void setNextFFTBlockReady(bool ready) { nextFFTBlockReady = ready; }
+    void setNextFFTBlockReady(bool ready) { nextFFTBlockReady.store(ready); }
 
     // Pre-EQ Spektrum für Messung
     void pushNextSampleIntoPreEQFifo(float sample) noexcept;  // Sample in Pre-EQ FIFO speichern
     void updatePreEQSpectrumArray(double sampleRate);         // Pre-EQ FFT berechnen
-    bool getNextPreEQFFTBlockReady() const { return nextPreEQFFTBlockReady; }
-    void setNextPreEQFFTBlockReady(bool ready) { nextPreEQFFTBlockReady = ready; }
+    bool getNextPreEQFFTBlockReady() const { return nextPreEQFFTBlockReady.load(); }
+    void setNextPreEQFFTBlockReady(bool ready) { nextPreEQFFTBlockReady.store(ready); }
 
     // Spektrum-Punktstruktur
     struct SpectrumPoint
@@ -101,7 +102,7 @@ public:
     // Persistente Daten für Referenz- und Differenzkurve
     std::vector<ReferenceBand> referenceBands;           // Referenzkurve
     std::array<float, 31> targetCorrections;             // Berechnete Korrekturen
-    bool hasTargetCorrections = false;                   // Flag ob Differenzkurve vorhanden
+    std::atomic<bool> hasTargetCorrections{ false };
     int selectedGenreId = 0;                             // Ausgewähltes Genre im Dropdown
 
     // Referenzkurve laden
@@ -119,7 +120,7 @@ public:
     void startMeasurement();
     void stopMeasurement();
     void addMeasurementSnapshot();
-    bool isMeasuring() const { return measuring; }
+    bool isMeasuring() const { return measuring.load(); }
 
     // Gespeicherte Spektrum-Daten abrufen
     const std::vector<std::vector<SpectrumPoint>>& getMeasurementBuffer() const { return measurementBuffer; }
@@ -140,7 +141,7 @@ private:
     //==============================================================================
     // Messungs-Speicher
     std::vector<std::vector<SpectrumPoint>> measurementBuffer;  // Alle Snapshots während Messung
-    bool measuring = false;                                      // Flag ob Messung aktiv ist
+    std::atomic<bool> measuring{ false };                       // Flag ob Messung aktiv ist
 
     // Festgelegte Filterfrequenzen für 31 Bänder
     const std::array<float, numBands> filterFrequencies = {
@@ -164,7 +165,7 @@ private:
     float fifo[fftSize];                              // FIFO für FFT-Eingang (Post-EQ)
     float fftData[2 * fftSize];                       // FFT-Datenpuffer
     int fifoIndex = 0;                                // Index für FIFO
-    bool nextFFTBlockReady = false;                   // Flag für neue FFT-Daten
+    std::atomic<bool> nextFFTBlockReady{ false };     // Flag für neue FFT-Daten
     float scopeData[scopeSize];                       // Normiertes Spektrum für Anzeige
 
     //==============================================================================
@@ -174,7 +175,7 @@ private:
     float preEQFifo[fftSize];                         // FIFO für FFT-Eingang (Pre-EQ)
     float preEQFftData[2 * fftSize];                  // FFT-Datenpuffer für Pre-EQ
     int preEQFifoIndex = 0;                           // Index für Pre-EQ FIFO
-    bool nextPreEQFFTBlockReady = false;              // Flag für neue Pre-EQ FFT-Daten
+    std::atomic<bool> nextPreEQFFTBlockReady{ false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioPluginAudioProcessor)
 };

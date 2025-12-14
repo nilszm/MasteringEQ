@@ -3,6 +3,7 @@
 #pragma once
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
+#include <atomic>
 
 //==============================================================================
 class AudioPluginAudioProcessorEditor : public juce::AudioProcessorEditor,
@@ -127,6 +128,8 @@ private:
     // Timer callback for GUI updates
     void timerCallback() override;
 
+    void startAutoEqAsync(); // Auto-EQ im Background starten
+
     // Auto-EQ Funktion
     void applyAutoEQ();
     void drawTargetEQCurve(juce::Graphics& g);
@@ -176,6 +179,8 @@ private:
     // UI-Status
     bool referenceAnalysisRunning = false;
 
+    juce::ThreadPool autoEqPool{ 1 };              // 1 Thread reicht
+    std::atomic<bool> autoEqRunning{ false };      // verhindert Doppelstarts
 
     // Button für Reset
     juce::TextButton resetButton;
