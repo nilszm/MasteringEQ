@@ -767,9 +767,11 @@ void AudioPluginAudioProcessorEditor::setupMeasurementButton()
                 {
                     startAutoEqAsync();
                 }
+                else
                 {
                     DBG("Keine Referenzkurve ausgewählt!");
                 }
+
             }
             else
             {
@@ -2076,6 +2078,115 @@ namespace
         return true;
     }
 
+    static double computeLossWithSmoothness(const std::vector<float>& freqs,
+        const std::vector<float>& targetDb,
+        const std::array<float, 31>& gainsDb,
+        const std::array<float, 31>& Qs,
+        float sampleRate,
+        const std::vector<float>& eqFreqs,
+        double lambdaSmooth,
+        double lambdaQ,
+        const std::array<float, 31>& Q0)
+    {
+        std::vector<float> respDb;
+        computeEQResponseDb(freqs, gainsDb, Qs, sampleRate, respDb, eqFreqs);
+
+        // 1) Fit error
+        double fit = 0.0;
+        for (size_t k = 0; k < freqs.size(); ++k)
+        {
+            const double e = (double)respDb[k] - (double)targetDb[k];
+            fit += e * e;
+        }
+
+        // 2) Smoothness (2nd derivative penalty) -> reduziert "Kammfilter/Ripple"
+        double smooth = 0.0;
+        if (respDb.size() >= 3)
+        {
+            for (size_t k = 1; k + 1 < respDb.size(); ++k)
+            {
+                const double d2 = (double)respDb[k + 1] - 2.0 * (double)respDb[k] + (double)respDb[k - 1];
+                smooth += d2 * d2;
+            }
+        }
+
+        // 3) Q regularization (log-domain, damit Multiplikativänderungen sinnvoll sind)
+        double qpen = 0.0;
+        for (int i = 0; i < 31; ++i)
+        {
+            const double q = juce::jmax(0.3, (double)Qs[(size_t)i]);
+            const double q0 = juce::jmax(0.3, (double)Q0[(size_t)i]);
+            const double t = std::log(q / q0);
+            qpen += t * t;
+        }
+
+        return fit + lambdaSmooth * smooth + lambdaQ * qpen;
+    }
+
+    static std::array<float, 31> fitQsStage2_Coordinate(const std::vector<float>& freqs,
+        const std::vector<float>& targetDb,
+        const std::array<float, 31>& gainsDbFixed,
+        std::array<float, 31> Qs,
+        float sampleRate,
+        const std::vector<float>& eqFreqs)
+    {
+        // Defaults / Gewichte: praxisnah starten
+        const double lambdaSmooth = 0.25;  // höher => glatter, weniger Ripple
+        const double lambdaQ = 0.05;  // höher => Q bleibt näher am Default
+
+        std::array<float, 31> Q0 = Qs;      // "aktueller" Ausgangspunkt als Default (oder 4.32 überall)
+
+        // Kandidatenfaktoren (multiplikativ)
+        const float factors[] = { 0.70f, 0.85f, 1.0f, 1.18f, 1.35f };
+
+        double bestLoss = computeLossWithSmoothness(freqs, targetDb, gainsDbFixed, Qs, sampleRate, eqFreqs,
+            lambdaSmooth, lambdaQ, Q0);
+
+        constexpr int iters = 4; // 3..6 reicht oft
+
+        for (int iter = 0; iter < iters; ++iter)
+        {
+            bool anyImproved = false;
+
+            for (int i = 0; i < 31; ++i)
+            {
+                const float qCur = Qs[(size_t)i];
+
+                float bestQ = qCur;
+                double localBest = bestLoss;
+
+                for (float fac : factors)
+                {
+                    float qTry = juce::jlimit(0.3f, 10.0f, qCur * fac);
+
+                    auto QtryArr = Qs;
+                    QtryArr[(size_t)i] = qTry;
+
+                    const double L = computeLossWithSmoothness(freqs, targetDb, gainsDbFixed, QtryArr, sampleRate, eqFreqs,
+                        lambdaSmooth, lambdaQ, Q0);
+
+                    if (L < localBest)
+                    {
+                        localBest = L;
+                        bestQ = qTry;
+                    }
+                }
+
+                if (bestQ != qCur)
+                {
+                    Qs[(size_t)i] = bestQ;
+                    bestLoss = localBest;
+                    anyImproved = true;
+                }
+            }
+
+            if (!anyImproved)
+                break;
+        }
+
+        return Qs;
+    }
+
     // Stufe 1 Fit: Gauss-Newton nur für Gains, Q fix
     static std::array<float, 31> fitGainsStage1(const std::vector<float>& freqs,
         const std::vector<float>& targetDb,
@@ -2212,6 +2323,24 @@ static void applyGainsToApvts(AudioPluginAudioProcessor& proc,
 
             p->beginChangeGesture();
             p->setValueNotifyingHost(p->convertTo0to1(clamped)); // <-- wichtig (Host/Automation-safe)
+            p->endChangeGesture();
+        }
+    }
+}
+
+static void applyQsToApvts(AudioPluginAudioProcessor& proc,
+    const std::array<float, 31>& Qs)
+{
+    for (int i = 0; i < 31; ++i)
+    {
+        const juce::String paramID = "bandQ" + juce::String(i);
+
+        if (auto* p = dynamic_cast<juce::RangedAudioParameter*>(proc.apvts.getParameter(paramID)))
+        {
+            const float clamped = juce::jlimit(0.3f, 10.0f, Qs[(size_t)i]);
+
+            p->beginChangeGesture();
+            p->setValueNotifyingHost(p->convertTo0to1(clamped));
             p->endChangeGesture();
         }
     }
@@ -2363,19 +2492,29 @@ void AudioPluginAudioProcessorEditor::startAutoEqAsync()
             // Stufe 1 Fit
             std::array<float, 31> fitted = fitGainsStage1(fitFreqs, targetDb, qFixed, sr, bandFreqs);
 
+            // Stage 2: Q optimieren (Gains erstmal fix)
+            std::array<float, 31> fittedQs = fitQsStage2_Coordinate(fitFreqs, targetDb, fitted, qFixed, sr, bandFreqs);
+
+            // Optional: Gains nochmal nachziehen mit neuen Qs (macht Ergebnis deutlich stabiler)
+            std::array<float, 31> fittedGains2 = fitGainsStage1(fitFreqs, targetDb, fittedQs, sr, bandFreqs);
+
             // --- zurück in GUI Thread ---
-            juce::MessageManager::callAsync([safe = safeEditor, fitted]() mutable
+            juce::MessageManager::callAsync([safe = safeEditor, fittedGains2, fittedQs]() mutable
                 {
                     if (safe == nullptr)
                         return;
 
+                    // Zielkurve für die Anzeige (gelbe Kurve) = finaler Gain-Vorschlag
                     for (int i = 0; i < 31; ++i)
-                        safe->processorRef.targetCorrections[i] = juce::jlimit(-12.0f, 12.0f, fitted[(size_t)i]);
+                        safe->processorRef.targetCorrections[i] = juce::jlimit(-12.0f, 12.0f, fittedGains2[(size_t)i]);
 
                     safe->processorRef.hasTargetCorrections = true;
 
                     safe->autoEqRunning = false;
-                    applyGainsToApvts(safe->processorRef, fitted);
+
+                    // Fader + Q automatisch setzen
+                    applyGainsToApvts(safe->processorRef, fittedGains2);
+                    applyQsToApvts(safe->processorRef, fittedQs);
 
                     // UI wieder freigeben
                     safe->genreErkennenButton.setEnabled(true);
