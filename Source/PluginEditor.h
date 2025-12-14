@@ -21,7 +21,6 @@ private:
     // Setup-Funktionen (aus Konstruktor ausgelagert)
     void initializeWindow();
     void setupGenreDropdown();
-    void setupWarningLabel();
     void setupMeasurementButton();
     void setupLoadReferenceButton();
     void setupResetButton();
@@ -29,6 +28,7 @@ private:
     void setupEQSliders();
     void setupQKnobs();
     void setupInputGainSlider();
+    void updateMeasurementButtonEnabledState();
 
     // ============================================================================
 // Diese Funktionsdeklarationen in PluginEditor.h einfügen (private Bereich):
@@ -227,9 +227,6 @@ private:
 
     // EQ Beschriftungsbereich
     juce::Rectangle<int> eqLabelArea;
-
-    // Bei den anderen Member-Variablen hinzufügen:
-    juce::Label warningLabel;
 
     bool showEQCurve = false;
     juce::TextButton eqCurveToggleButton;

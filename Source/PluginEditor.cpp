@@ -81,6 +81,57 @@ namespace
 
         return cur;
     }
+    static void postProcessReferenceBands(std::vector<AudioPluginAudioProcessor::ReferenceBand>& bands)
+    {
+        if (bands.size() < 3) return;
+
+        std::vector<float> p10, med, p90;
+        p10.reserve(bands.size());
+        med.reserve(bands.size());
+        p90.reserve(bands.size());
+
+        for (auto& b : bands)
+        {
+            p10.push_back(b.p10);
+            med.push_back(b.median);
+            p90.push_back(b.p90);
+        }
+
+        p10 = smoothMovingAverage(p10, 5, 2);
+        med = smoothMovingAverage(med, 5, 2);
+        p90 = smoothMovingAverage(p90, 5, 2);
+
+        constexpr float kSpreadShrink = 0.55f;
+        constexpr float kMaxBandWidthDb = 6.0f;
+        constexpr float kMinBandWidthDb = 1.0f;
+
+        for (size_t i = 0; i < bands.size(); ++i)
+        {
+            const float m = med[i];
+
+            float lo = m - kSpreadShrink * (m - p10[i]);
+            float hi = m + kSpreadShrink * (p90[i] - m);
+
+            float w = hi - lo;
+            if (w > kMaxBandWidthDb)
+            {
+                lo = m - 0.5f * kMaxBandWidthDb;
+                hi = m + 0.5f * kMaxBandWidthDb;
+            }
+            else if (w < kMinBandWidthDb)
+            {
+                lo = m - 0.5f * kMinBandWidthDb;
+                hi = m + 0.5f * kMinBandWidthDb;
+            }
+
+            if (lo > m) lo = m;
+            if (hi < m) hi = m;
+
+            bands[i].p10 = lo;
+            bands[i].median = m;
+            bands[i].p90 = hi;
+        }
+    }
 }
 
  //==============================================================================
@@ -200,7 +251,6 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor(AudioPluginAudi
     // Alle UI-Komponenten initialisieren
     initializeWindow();
     setupGenreDropdown();
-    setupWarningLabel();
     setupMeasurementButton();
     setupResetButton();
     setupEQCurveToggle();
@@ -262,6 +312,24 @@ float AudioPluginAudioProcessorEditor::computeReferenceViewOffsetDb(
 //==============================================================================
 //                           SETUP-FUNKTIONEN
 //==============================================================================
+
+void AudioPluginAudioProcessorEditor::updateMeasurementButtonEnabledState()
+{
+    const bool hasGenre = (genreBox.getSelectedId() != 0);
+    const bool hasReference = !processorRef.referenceBands.empty();
+
+    const bool enable = hasGenre || hasReference;
+
+    genreErkennenButton.setEnabled(enable);
+
+    // Optional: Wenn disabled und gerade gemessen wird -> Messung beenden
+    if (!enable && processorRef.isMeasuring())
+    {
+        processorRef.stopMeasurement();
+        genreErkennenButton.setButtonText("Messung starten");
+        genreErkennenButton.setColour(juce::TextButton::buttonColourId, juce::Colours::grey);
+    }
+}
 
 /**
  * @brief Initialisiert die Fenstereinstellungen.
@@ -335,6 +403,8 @@ void AudioPluginAudioProcessorEditor::setupLoadReferenceButton()
                                     safe->referenceAnalysisRunning = false;
                                     safe->loadReferenceButton.setEnabled(true);
                                     safe->loadReferenceButton.setButtonText("Referenz laden");
+
+                                    safe->updateMeasurementButtonEnabledState();
 
                                     safe->repaint();
                                 });
@@ -560,6 +630,7 @@ void AudioPluginAudioProcessorEditor::setupLoadReferenceButton()
                                     }
                                 }
                             }
+                            postProcessReferenceBands(out);
                             return out;
                         }
 
@@ -607,21 +678,27 @@ void AudioPluginAudioProcessorEditor::setupGenreDropdown()
             {
             case 1:
                 processorRef.loadReferenceCurve("pop_neu.json");
+                postProcessReferenceBands(processorRef.referenceBands);
                 break;
             case 2:
                 processorRef.loadReferenceCurve("HipHop.json");
+                postProcessReferenceBands(processorRef.referenceBands);
                 break;
             case 3:
                 processorRef.loadReferenceCurve("Rock.json");
+                postProcessReferenceBands(processorRef.referenceBands);
                 break;
             case 4:
                 processorRef.loadReferenceCurve("EDM.json");
+                postProcessReferenceBands(processorRef.referenceBands);
                 break;
             case 5:
                 processorRef.loadReferenceCurve("Klassik.json");
+                postProcessReferenceBands(processorRef.referenceBands);
                 break;
             case 6:
                 processorRef.loadReferenceCurve("test.json");
+                postProcessReferenceBands(processorRef.referenceBands);
                 break;
             default:
                 processorRef.referenceBands.clear();
@@ -629,6 +706,7 @@ void AudioPluginAudioProcessorEditor::setupGenreDropdown()
             }
 
             repaint();
+            updateMeasurementButtonEnabledState();
         };
 
     // Gespeichertes Genre aus vorheriger Session wiederherstellen
@@ -636,26 +714,8 @@ void AudioPluginAudioProcessorEditor::setupGenreDropdown()
     {
         genreBox.setSelectedId(processorRef.selectedGenreId, juce::dontSendNotification);
     }
-
+    updateMeasurementButtonEnabledState();
     addAndMakeVisible(genreBox);
-}
-
-/**
- * @brief Konfiguriert das Warnungs-Label.
- *
- * Erstellt ein rotes Label, das angezeigt wird, wenn der Benutzer
- * versucht eine Messung ohne Genre-Auswahl zu starten.
- * Das Label ist initial unsichtbar.
- */
-void AudioPluginAudioProcessorEditor::setupWarningLabel()
-{
-    warningLabel.setText("Wahle ein Genre aus um die Messung zu starten!",
-        juce::dontSendNotification);
-    warningLabel.setColour(juce::Label::textColourId, juce::Colours::red);
-    warningLabel.setFont(juce::Font(14.0f, juce::Font::bold));
-    warningLabel.setJustificationType(juce::Justification::centred);
-    warningLabel.setVisible(false);
-    addAndMakeVisible(warningLabel);
 }
 
 /**
@@ -672,26 +732,14 @@ void AudioPluginAudioProcessorEditor::setupMeasurementButton()
     genreErkennenButton.setColour(juce::TextButton::buttonColourId, juce::Colours::grey);
 
     genreErkennenButton.onClick = [this]
-        {
-            // Prüfen ob Genre ausgewählt wurde
-            if (genreBox.getSelectedId() == 0)
-            {
-                // Warnung anzeigen und nach 2 Sekunden ausblenden
-                warningLabel.setVisible(true);
-                juce::Timer::callAfterDelay(2000, [this]()
-                    {
-                        if (this != nullptr)
-                            warningLabel.setVisible(false);
-                    });
-                return;
-            }
-
+        {        
             // Messung starten oder stoppen
             if (processorRef.isMeasuring())
             {
                 // Messung beenden
                 processorRef.stopMeasurement();
                 genreErkennenButton.setButtonText("Messung starten");
+                genreErkennenButton.setEnabled(true);
                 genreErkennenButton.setColour(juce::TextButton::buttonColourId, juce::Colours::grey);
 
                 // Auto-EQ berechnen wenn Referenzkurve vorhanden
@@ -1260,7 +1308,6 @@ void AudioPluginAudioProcessorEditor::layoutTopBar(juce::Rectangle<int>& area)
     genreErkennenButton.setBounds(10, 5, 200, 30);
     loadReferenceButton.setBounds(560, 5, 140, 30);
     eqCurveToggleButton.setBounds(220, 5, 150, 30);
-    warningLabel.setBounds(380, 5, 320, 30);
     genreBox.setBounds(710, 5, 220, 30);
     resetButton.setBounds(940, 5, 50, 30);
     inputGainSlider.setBounds(770, 45, 220, 30);
