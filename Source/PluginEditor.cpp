@@ -2022,6 +2022,50 @@ namespace
         }
     }
 
+    static float computeMakeupGainDbFromEQ(const std::vector<float>& freqs,
+        const std::array<float, 31>& gainsDb,
+        const std::array<float, 31>& Qs,
+        float sampleRate,
+        const std::vector<float>& eqFreqs)
+    {
+        std::vector<float> respDb;
+        computeEQResponseDb(freqs, gainsDb, Qs, sampleRate, respDb, eqFreqs);
+
+        // Wir mitteln im "relevanten" Bereich (Bass nicht überbewerten)
+        const float fMin = 60.0f;
+        const float fMax = 12000.0f;
+
+        double sumW = 0.0;
+        double sumPow = 0.0;
+
+        for (size_t k = 0; k < freqs.size(); ++k)
+        {
+            const float f = freqs[k];
+            if (f < fMin || f > fMax) continue;
+
+            // Gewicht: Bass etwas weniger, Mitten normal
+            double w = 1.0;
+            if (f < 120.0f) w *= 0.6;      // Bass weniger stark zählen
+            if (f > 8000.0f) w *= 0.8;     // Air weniger stark zählen
+
+            const double db = (double)respDb[k];
+
+            // respDb = 20log10(|H|) -> Power-Gain = |H|^2 = 10^(db/10)
+            const double powGain = std::pow(10.0, db / 10.0);
+
+            sumPow += w * powGain;
+            sumW += w;
+        }
+
+        if (sumW <= 1.0e-12) return 0.0f;
+
+        const double meanPow = sumPow / sumW;
+
+        // Makeup so, dass mittlere Power wieder ~1 wird
+        const double makeupDb = -10.0 * std::log10(std::max(1.0e-12, meanPow));
+        return (float)makeupDb;
+    }
+
     // Löser für symmetrisches, positiv definites LGS (Cholesky) – n ist klein (31)
     static bool solveSPD_Cholesky(std::vector<double>& A, std::vector<double>& b, int n)
     {
@@ -2278,6 +2322,30 @@ namespace
             for (int i = 0; i < M; ++i)
                 AtA[(size_t)i * M + i] += damping;
 
+            // --- Gain Smoothness Regularization (verhindert Ripple/Kammfilter in der EQ-Kurve) ---
+            // Minimiert Sum (g[i] - g[i-1])^2
+            constexpr double lambdaGainSmooth = 0.35; // 0.15 .. 1.0 (höher = glatter)
+
+            for (int i = 0; i < M; ++i)
+            {
+                double diag = 0.0;
+
+                if (i > 0)
+                {
+                    diag += lambdaGainSmooth;
+                    AtA[(size_t)i * M + (i - 1)] -= lambdaGainSmooth;
+                    AtA[(size_t)(i - 1) * M + i] -= lambdaGainSmooth;
+                }
+
+                if (i < M - 1)
+                {
+                    diag += lambdaGainSmooth;
+                    // (i,i+1) kommt implizit über den i>0-Teil beim nächsten Index rein
+                }
+
+                AtA[(size_t)i * M + i] += diag;
+            }
+
             // Solve
             auto Awork = AtA;
             auto bwork = Atb;
@@ -2346,6 +2414,17 @@ static void applyQsToApvts(AudioPluginAudioProcessor& proc,
     }
 }
 
+static void applyInputGainToApvts(AudioPluginAudioProcessor& proc, float gainDb)
+{
+    if (auto* p = dynamic_cast<juce::RangedAudioParameter*>(proc.apvts.getParameter("inputGain")))
+    {
+        const float clamped = juce::jlimit(-24.0f, 24.0f, gainDb);
+        p->beginChangeGesture();
+        p->setValueNotifyingHost(p->convertTo0to1(clamped));
+        p->endChangeGesture();
+    }
+}
+
 void AudioPluginAudioProcessorEditor::startAutoEqAsync()
 {
     // Schon am laufen? -> nichts tun
@@ -2375,6 +2454,10 @@ void AudioPluginAudioProcessorEditor::startAutoEqAsync()
     if (!(sr > 0.0f))
         sr = 48000.0f;
 
+    float inputGainBeforeDb = 0.0f;
+    if (auto* v = processorRef.apvts.getRawParameterValue("inputGain"))
+        inputGainBeforeDb = v->load();
+
     // SafePointer: falls Editor geschlossen wird während der Berechnung
     juce::Component::SafePointer<AudioPluginAudioProcessorEditor> safeThis(this);
 
@@ -2386,11 +2469,12 @@ void AudioPluginAudioProcessorEditor::startAutoEqAsync()
             std::vector<AudioPluginAudioProcessor::ReferenceBand> ref,
             std::array<float, 31> q,
             std::array<float, 31> eqF,
-            float sampleRate)
+            float sampleRate,
+            float inputGainBefore)
             : juce::ThreadPoolJob("AutoEqJob"),
             safeEditor(s), processor(p),
             spectrum(std::move(spec)), reference(std::move(ref)),
-            qFixed(q), eqFreqs(eqF), sr(sampleRate) {
+            qFixed(q), eqFreqs(eqF), sr(sampleRate), inputGainBeforeDb(inputGainBefore) {
         }
 
         static float computeOffsetFromCopies(
@@ -2489,34 +2573,94 @@ void AudioPluginAudioProcessorEditor::startAutoEqAsync()
             for (auto f : fitFreqs)
                 targetDb.push_back(interpLogCurveDb(bandFreqs, residuals, f));
 
-            // Stufe 1 Fit
-            std::array<float, 31> fitted = fitGainsStage1(fitFreqs, targetDb, qFixed, sr, bandFreqs);
+            // Stufe 1: Gains fitten (Q fix)
+            std::array<float, 31> gainsStage1 = fitGainsStage1(fitFreqs, targetDb, qFixed, sr, bandFreqs);
 
-            // Stage 2: Q optimieren (Gains erstmal fix)
-            std::array<float, 31> fittedQs = fitQsStage2_Coordinate(fitFreqs, targetDb, fitted, qFixed, sr, bandFreqs);
+            // Stufe 2: Qs optimieren (gegen Ripple)
+            std::array<float, 31> qStage2 = fitQsStage2_Coordinate(fitFreqs, targetDb, gainsStage1, qFixed, sr, bandFreqs);
 
-            // Optional: Gains nochmal nachziehen mit neuen Qs (macht Ergebnis deutlich stabiler)
-            std::array<float, 31> fittedGains2 = fitGainsStage1(fitFreqs, targetDb, fittedQs, sr, bandFreqs);
+            // Q hard limits (Basis)
+            for (auto& q : qStage2)
+                q = juce::jlimit(0.6f, 6.0f, q);
 
-            // --- zurück in GUI Thread ---
-            juce::MessageManager::callAsync([safe = safeEditor, fittedGains2, fittedQs]() mutable
+            // Danach: Gains nochmal fitten mit neuen Qs
+            std::array<float, 31> finalGains = fitGainsStage1(fitFreqs, targetDb, qStage2, sr, bandFreqs);
+
+            // Optional: Q abhängig von Gain begrenzen
+            for (int i = 0; i < 31; ++i)
+            {
+                const float gAbs = std::abs(finalGains[(size_t)i]);
+                float q = qStage2[(size_t)i];
+
+                const float qMax = (gAbs > 8.0f) ? 1.4f
+                    : (gAbs > 5.0f) ? 2.2f
+                    : 4.0f;
+
+                qStage2[(size_t)i] = juce::jlimit(0.6f, qMax, q);
+            }
+
+            // WICHTIG: Nach Q-Begrenzung Gains nochmal refitten, sonst passt’s nicht mehr!
+            finalGains = fitGainsStage1(fitFreqs, targetDb, qStage2, sr, bandFreqs);
+
+            // === Makeup Gain so berechnen, dass (Meas + offset + EQResponse) wieder zur Referenz passt ===
+// 1) EQ-Response in dB auf fitFreqs berechnen
+            std::vector<float> respDb;
+            computeEQResponseDb(fitFreqs, finalGains, qStage2, sr, respDb, bandFreqs);
+
+            // 2) Median-Differenz im stabilen Bereich bilden
+            std::vector<float> diffs;
+            diffs.reserve(fitFreqs.size());
+
+            for (size_t k = 0; k < fitFreqs.size(); ++k)
+            {
+                const float f = fitFreqs[k];
+                if (f < 50.0f || f > 10000.0f) // ggf. 60..10k wenn du Bass noch mehr rausnehmen willst
+                    continue;
+
+                const float ref = sampleLogInterpolatedReferenceMedian(reference, f, DisplayScale::minDb);
+                float meas = sampleLogInterpolatedSpectrum(spectrum, f, DisplayScale::minDb);
+
+                // Gate wie bei Residuals (verhindert "Noise floor" Einfluss)
+                const float gateDb = DisplayScale::minDb + 10.0f;
+                if (meas < gateDb) meas = gateDb;
+
+                const float predictedPost = meas + offsetDb + respDb[k];
+                diffs.push_back(ref - predictedPost);
+            }
+
+            float makeupDeltaDb = 0.0f;
+            if (!diffs.empty())
+            {
+                std::nth_element(diffs.begin(), diffs.begin() + diffs.size() / 2, diffs.end());
+                makeupDeltaDb = diffs[diffs.size() / 2];
+            }
+
+            makeupDeltaDb = juce::jlimit(-12.0f, 12.0f, makeupDeltaDb);
+
+            const float inputGainBefore = inputGainBeforeDb;
+
+
+            juce::MessageManager::callAsync([safe = safeEditor,
+                finalGains,
+                finalQs = qStage2,
+                makeupDeltaDb,
+                inputGainBefore]() mutable
                 {
                     if (safe == nullptr)
                         return;
 
-                    // Zielkurve für die Anzeige (gelbe Kurve) = finaler Gain-Vorschlag
                     for (int i = 0; i < 31; ++i)
-                        safe->processorRef.targetCorrections[i] = juce::jlimit(-12.0f, 12.0f, fittedGains2[(size_t)i]);
+                        safe->processorRef.targetCorrections[i] = juce::jlimit(-12.0f, 12.0f, finalGains[(size_t)i]);
 
                     safe->processorRef.hasTargetCorrections = true;
-
                     safe->autoEqRunning = false;
 
-                    // Fader + Q automatisch setzen
-                    applyGainsToApvts(safe->processorRef, fittedGains2);
-                    applyQsToApvts(safe->processorRef, fittedQs);
+                    applyQsToApvts(safe->processorRef, finalQs);
+                    applyGainsToApvts(safe->processorRef, finalGains);
 
-                    // UI wieder freigeben
+                    const float newInputGain = juce::jlimit(-24.0f, 24.0f, inputGainBefore + makeupDeltaDb);
+                    applyInputGainToApvts(safe->processorRef, newInputGain);
+
                     safe->genreErkennenButton.setEnabled(true);
                     safe->genreErkennenButton.setButtonText("Messung starten");
                     safe->loadReferenceButton.setEnabled(true);
@@ -2538,6 +2682,7 @@ void AudioPluginAudioProcessorEditor::startAutoEqAsync()
         std::array<float, 31> qFixed{};
         std::array<float, 31> eqFreqs{};
         float sr = 48000.0f;
+        float inputGainBeforeDb = 0.0f;
     };
 
     autoEqPool.addJob(new Job(safeThis,
@@ -2546,7 +2691,8 @@ void AudioPluginAudioProcessorEditor::startAutoEqAsync()
         referenceBandsCopy,
         qCopy,
         eqFreqCopy,
-        sr),
+        sr,
+        inputGainBeforeDb),
         true);
 }
 
