@@ -41,6 +41,8 @@ public:
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override;
 
+    void resetMeasurement();
+
     //==============================================================================
     // Basisinformationen über das Plugin
     const juce::String getName() const override;

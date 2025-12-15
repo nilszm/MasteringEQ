@@ -216,25 +216,29 @@ void AudioPluginAudioProcessor::updateFilters()
 
 void AudioPluginAudioProcessor::resetAllBandsToDefault()
 {
+    // InputGain zurücksetzen
+    if (auto* pIn = dynamic_cast<juce::RangedAudioParameter*>(apvts.getParameter("inputGain")))
+        pIn->setValueNotifyingHost(pIn->getDefaultValue());
+
     for (int i = 0; i < numBands; ++i)
     {
-        // Gain zurücksetzen
+        // Gain
         {
             juce::String paramID = "band" + juce::String(i);
             if (auto* p = dynamic_cast<juce::RangedAudioParameter*>(apvts.getParameter(paramID)))
                 p->setValueNotifyingHost(p->getDefaultValue());
         }
 
-        // NEU: Q zurücksetzen
+        // Q
         {
             juce::String qID = "bandQ" + juce::String(i);
             if (auto* pQ = dynamic_cast<juce::RangedAudioParameter*>(apvts.getParameter(qID)))
                 pQ->setValueNotifyingHost(pQ->getDefaultValue());
         }
     }
-
     updateFilters();
 }
+
 
 //==============================================================================
 // Ressourcen freigeben
@@ -587,8 +591,16 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 // Messung starten
 void AudioPluginAudioProcessor::startMeasurement()
 {
+    // nur Mess/FFT-Teil resetten (Referenz bleibt)
     measurementBuffer.clear();
-    measuring.store(true);
+    preEQSpectrumArray.clear();
+
+    preEQFifoIndex = 0;
+    nextPreEQFFTBlockReady.store(false, std::memory_order_release);
+    juce::zeromem(preEQFifo, sizeof(preEQFifo));
+    juce::zeromem(preEQFftData, sizeof(preEQFftData));
+
+    measuring.store(true, std::memory_order_release);
     DBG("Messung gestartet");
 }
 
@@ -617,6 +629,37 @@ void AudioPluginAudioProcessor::clearMeasurement()
 {
     measurementBuffer.clear();
     measuring = false;
+}
+
+void AudioPluginAudioProcessor::resetMeasurement()
+{
+    // 1) Mess-Logik stoppen & Buffer leeren
+    measuring.store(false, std::memory_order_release);
+    measurementBuffer.clear();
+    preEQSpectrumArray.clear();
+
+    // 2) Target (grüne gestrichelte Kurve) zurücksetzen / ausblenden
+    targetCorrections.fill(0.0f);
+    hasTargetCorrections.store(false, std::memory_order_release);
+
+    targetResidualsDb.fill(0.0f);
+    hasTargetResiduals = false;
+
+    // 3) FFT-States (Pre + Post) sauber zurücksetzen
+    fifoIndex = 0;
+    preEQFifoIndex = 0;
+
+    nextFFTBlockReady.store(false, std::memory_order_release);
+    nextPreEQFFTBlockReady.store(false, std::memory_order_release);
+
+    spectrumArray.clear();
+
+    juce::zeromem(fifo, sizeof(fifo));
+    juce::zeromem(fftData, sizeof(fftData));
+    juce::zeromem(scopeData, sizeof(scopeData));
+
+    juce::zeromem(preEQFifo, sizeof(preEQFifo));
+    juce::zeromem(preEQFftData, sizeof(preEQFftData));
 }
 
 //==============================================================================

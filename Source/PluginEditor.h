@@ -43,7 +43,8 @@ private:
     void drawFrequencyGrid(juce::Graphics& g);
     void drawEQAreas(juce::Graphics& g);
     void drawEQLabels(juce::Graphics& g);
-
+    void drawEQDbGridLines(juce::Graphics& g);
+    void drawEQDbGridLabels(juce::Graphics& g);
 
     // ============================================================================
 // Diese Funktionsdeklarationen in PluginEditor.h einfügen (private Bereich):
