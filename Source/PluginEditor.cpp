@@ -1540,8 +1540,14 @@ std::vector<juce::Point<float>> AudioPluginAudioProcessorEditor::calculateSpectr
 
         // Exponential Smoothing: Kombiniert alten und neuen Wert
         // smoothingFactor nahe 1.0 = langsame Änderung (mehr Glätten)
-        smoothedLevels[i] = smoothedLevels[i] * smoothingFactor +
-            point.level * (1.0f - smoothingFactor);
+        // Bass bekommt viel mehr zeitliche Glättung (ruhiger), Höhen dürfen schneller reagieren
+        float a = smoothingFactor;
+        if (point.frequency < 150.0f) a = 0.96f;
+        if (point.frequency < 80.0f) a = 0.98f;
+        if (point.frequency < 40.0f) a = 0.985f;
+
+        smoothedLevels[i] = smoothedLevels[i] * a + point.level * (1.0f - a);
+
 
         float level = smoothedLevels[i];
         if (!processorRef.referenceBands.empty())
@@ -1579,7 +1585,7 @@ void AudioPluginAudioProcessorEditor::applySpatialSmoothingToPoints(
         yValues.push_back(point.getY());
 
     // Räumliches Smoothing mit Fenstergröße 5 anwenden
-    auto smoothedY = applySpatialSmoothing(yValues, 5);
+    auto smoothedY = applySpatialSmoothing(yValues, 3);
 
     // Geglättete Y-Werte zurückschreiben
     for (size_t i = 0; i < points.size() && i < smoothedY.size(); ++i)
@@ -1680,25 +1686,26 @@ std::vector<float> AudioPluginAudioProcessorEditor::applySpatialSmoothing(
  */
 void AudioPluginAudioProcessorEditor::drawEQCurve(juce::Graphics& g)
 {
-    const int numPoints = 2000;  // Hohe Auflösung für glatte Kurve
+    const int numPoints = 2000;
     const float minFreq = 20.0f;
-    const float maxFreq = 20000.0f;
 
-    // 1. Logarithmisches Frequenzarray generieren
-    auto frequencies = generateLogFrequencies(numPoints, minFreq, maxFreq);
+    float sr = (float)processorRef.getSampleRate();
+    if (!(sr > 0.0f)) sr = 48000.0f;
 
-    // 2. Gesamtmagnitude über alle Bänder berechnen
+    const float maxUsable = 0.5f * sr * 0.999f;
+    const float maxFreqDraw = juce::jmin(20000.0f, maxUsable);
+
+    // WICHTIG: genau dieses Array später weiterverwenden
+    auto frequencies = generateLogFrequencies(numPoints, minFreq, maxFreqDraw);
+
     auto totalMagnitudeDB = calculateTotalMagnitude(frequencies, numPoints);
 
-    // 3. Pfad aus den Daten erstellen
-    auto eqPath = buildEQPath(frequencies, totalMagnitudeDB, numPoints, minFreq, maxFreq);
+    auto eqPath = buildEQPath(frequencies, totalMagnitudeDB, numPoints, minFreq, maxFreqDraw);
 
-    // 4. Kurve mit Füllung zeichnen
     drawEQPathWithFill(g, eqPath);
-
-    // 5. Ziel-Korrekturkurve überlagern
     drawTargetEQCurve(g);
 }
+
 
 //==============================================================================
 //                  DRAW EQ CURVE HILFSFUNKTIONEN
@@ -1949,9 +1956,18 @@ namespace
     {
         outDb.assign(freqs.size(), 0.0f);
 
+        float sr = sampleRate;
+        if (!(sr > 0.0f))
+            sr = 48000.0f;
+
+        const float nyq = 0.5f * sr;
+        const float maxUsableHz = nyq * 0.999f; // Sicherheitsabstand zu Nyquist
+
         for (size_t k = 0; k < freqs.size(); ++k)
         {
-            const float f = freqs[k];
+            const float fIn = freqs[k];
+            const float f = juce::jlimit(20.0f, maxUsableHz, fIn);
+
             double sumDb = 0.0;
 
             for (int i = 0; i < 31; ++i)
@@ -1960,20 +1976,10 @@ namespace
                 if (std::abs(gRaw) <= 0.0001f)
                     continue;
 
-                // --- Guards ---
-                float sr = sampleRate;
-                if (!(sr > 0.0f)) sr = 48000.0f;
-
-                const float nyq = 0.5f * sr;
-
                 float f0 = eqFreqs[(size_t)i];
+                f0 = juce::jlimit(20.0f, maxUsableHz, f0);
+
                 float Q = Qs[(size_t)i];
-
-                // Nyquist-Clamp (sehr wichtig bei 20k Band + niedriger SR)
-                f0 = juce::jlimit(20.0f, nyq * 0.49f, f0);
-                float f = freqs[k];
-                f = juce::jlimit(20.0f, nyq * 0.49f, f);
-
                 Q = juce::jmax(0.001f, Q);
 
                 // Gain clamp + finite
@@ -1989,23 +1995,25 @@ namespace
                 float b0 = 1.0f + alpha * A;
                 float b1 = -2.0f * std::cos(w0);
                 float b2 = 1.0f - alpha * A;
+
                 float a0 = 1.0f + alpha / A;
                 float a1 = -2.0f * std::cos(w0);
                 float a2 = 1.0f - alpha / A;
 
-                // Normieren
+                // Normieren auf a0
                 b0 /= a0; b1 /= a0; b2 /= a0;
                 a1 /= a0; a2 /= a0;
 
-                std::complex<float> z1(std::cos(-w), std::sin(-w));
-                std::complex<float> z2(std::cos(-2.0f * w), std::sin(-2.0f * w));
+                // H(e^jw) = (b0 + b1 z^-1 + b2 z^-2) / (1 + a1 z^-1 + a2 z^-2), z^-1 = e^{-jw}
+                const std::complex<float> z1(std::cos(-w), std::sin(-w));
+                const std::complex<float> z2(std::cos(-2.0f * w), std::sin(-2.0f * w));
 
-                std::complex<float> num = b0 + b1 * z1 + b2 * z2;
-                std::complex<float> den = 1.0f + a1 * z1 + a2 * z2;
+                const std::complex<float> num = b0 + b1 * z1 + b2 * z2;
+                const std::complex<float> den = 1.0f + a1 * z1 + a2 * z2;
 
                 const float denMag = std::abs(den);
                 if (!std::isfinite(denMag) || denMag < 1.0e-12f)
-                    continue; // Filterbeitrag ignorieren statt NaN zu erzeugen
+                    continue; // Beitrag überspringen statt NaN zu erzeugen
 
                 float mag = std::abs(num / den);
                 if (!std::isfinite(mag)) mag = 1.0f;
@@ -2017,9 +2025,32 @@ namespace
                 sumDb += (double)magDb;
             }
 
-
             outDb[k] = (float)sumDb;
         }
+    }
+
+    static juce::Path buildResponsePath(
+        const juce::Rectangle<float>& area,
+        const std::vector<float>& freqs,
+        const std::vector<float>& respDb,
+        float minFreq, float maxFreq,
+        float minDb, float maxDb)
+    {
+        juce::Path p;
+        bool first = true;
+
+        for (size_t i = 0; i < freqs.size() && i < respDb.size(); ++i)
+        {
+            const float f = freqs[i];
+            const float db = juce::jlimit(minDb, maxDb, respDb[i]);
+
+            const float x = area.getX() + juce::mapFromLog10(f, minFreq, maxFreq) * area.getWidth();
+            const float y = juce::jmap(db, minDb, maxDb, area.getBottom(), area.getY());
+
+            if (first) { p.startNewSubPath(x, y); first = false; }
+            else { p.lineTo(x, y); }
+        }
+        return p;
     }
 
     static float computeMakeupGainDbFromEQ(const std::vector<float>& freqs,
@@ -2236,7 +2267,9 @@ namespace
         const std::vector<float>& targetDb,
         const std::array<float, 31>& Qs,
         float sampleRate,
-        const std::vector<float>& eqFreqs)
+        const std::vector<float>& eqFreqs,
+        const std::array<double, 31>* extraDiagPenalty = nullptr)
+
     {
         std::array<float, 31> gains{};
         gains.fill(0.0f);
@@ -2321,6 +2354,12 @@ namespace
             // Damping auf Diagonale
             for (int i = 0; i < M; ++i)
                 AtA[(size_t)i * M + i] += damping;
+
+            if (extraDiagPenalty != nullptr)
+            {
+                for (int i = 0; i < M; ++i)
+                    AtA[(size_t)i * M + i] += (*extraDiagPenalty)[(size_t)i];
+            }
 
             // --- Gain Smoothness Regularization (verhindert Ripple/Kammfilter in der EQ-Kurve) ---
             // Minimiert Sum (g[i] - g[i-1])^2
@@ -2550,7 +2589,23 @@ void AudioPluginAudioProcessorEditor::startAutoEqAsync()
 
                 measLevel += offsetDb;
 
-                float r = (refLevel - measLevel) * edgeWeight(f);
+                auto bassWeight = [](float f)
+                    {
+                        if (f < 40.0f) return 0.20f;
+                        if (f < 80.0f) return 0.35f;
+                        if (f < 120.0f) return 0.55f;
+                        return 1.0f;
+                    };
+
+                auto bandMaxCorr = [](float f)
+                    {
+                        if (f < 60.0f)  return 4.0f;   // ganz unten nie “wild” korrigieren
+                        if (f < 120.0f) return 6.0f;
+                        return 12.0f;
+                    };
+
+                float r = (refLevel - measLevel) * edgeWeight(f) * bassWeight(f);
+                r = juce::jlimit(-bandMaxCorr(f), bandMaxCorr(f), r);
                 residuals.push_back(r);
             }
 
@@ -2558,6 +2613,127 @@ void AudioPluginAudioProcessorEditor::startAutoEqAsync()
             residuals = smoothMovingAverage(residuals, 5, 1);
             for (auto& r : residuals)
                 r *= 1.0f; // kAutoEqAmount
+
+            std::array<float, 31> residualsArr{};
+            for (int i = 0; i < 31; ++i)
+                residualsArr[(size_t)i] = juce::jlimit(-12.0f, 12.0f, residuals[(size_t)i]);
+
+            // ==============================
+            // Hybrid Bass Mode (Peak+Dip breitbandig)
+            // ==============================
+            bool hybridBass = false;
+            int idxMax = -1;
+            int idxMin = -1;
+
+            std::array<double, 31> extraPenalty{};
+            extraPenalty.fill(0.0);
+
+            auto isBass = [&](float f)
+                {
+                    return (f >= 40.0f && f <= 400.0f);
+                };
+
+            // 1) Bass-Schwankung messen (Peak-to-Peak)
+            float bassMax = -1.0e9f;
+            float bassMin = 1.0e9f;
+
+            for (int i = 0; i < 31; ++i)
+            {
+                const float f = eqFreqs[(size_t)i];
+                if (!isBass(f)) continue;
+
+                bassMax = std::max(bassMax, residuals[(size_t)i]);
+                bassMin = std::min(bassMin, residuals[(size_t)i]);
+            }
+
+            const float bassP2P = bassMax - bassMin;
+
+            // Schwelle: ab hier "große" Schwankung -> Hybrid-Modus
+            // (Tipp: 5..8 dB je nach Material)
+            if (bassP2P > 6.0f)
+            {
+                hybridBass = true;
+
+                // 2) stärkstes Maximum + Minimum finden
+                float bestPos = -1.0e9f;
+                float bestNeg = 1.0e9f;
+
+                for (int i = 0; i < 31; ++i)
+                {
+                    const float f = eqFreqs[(size_t)i];
+                    if (!isBass(f)) continue;
+
+                    const float r = residuals[(size_t)i];
+
+                    if (r > bestPos) { bestPos = r; idxMax = i; }
+                    if (r < bestNeg) { bestNeg = r; idxMin = i; }
+                }
+
+                // 3) coarse bass target aus 2 breiten Gaussians bauen
+                std::vector<float> coarse = residuals;
+
+                // Bassbereich "leer machen"
+                for (int i = 0; i < 31; ++i)
+                    if (isBass(eqFreqs[(size_t)i]))
+                        coarse[(size_t)i] = 0.0f;
+
+                const float sigmaOct = 0.55f; // Breite in Oktaven (größer = breiter)
+
+                auto g = [&](float f, float fc)
+                    {
+                        const float x = std::log2(f);
+                        const float xc = std::log2(fc);
+                        const float d = (x - xc) / sigmaOct;
+                        return std::exp(-0.5f * d * d);
+                    };
+
+                if (idxMax >= 0)
+                {
+                    const float fc = eqFreqs[(size_t)idxMax];
+                    const float A = residuals[(size_t)idxMax];
+                    for (int i = 0; i < 31; ++i)
+                    {
+                        const float f = eqFreqs[(size_t)i];
+                        if (!isBass(f)) continue;
+                        coarse[(size_t)i] += A * g(f, fc);
+                    }
+                }
+
+                if (idxMin >= 0)
+                {
+                    const float fc = eqFreqs[(size_t)idxMin];
+                    const float A = residuals[(size_t)idxMin];
+                    for (int i = 0; i < 31; ++i)
+                    {
+                        const float f = eqFreqs[(size_t)i];
+                        if (!isBass(f)) continue;
+                        coarse[(size_t)i] += A * g(f, fc);
+                    }
+                }
+
+                // 4) Bass-Residuals ersetzen (Mix, damit’s nicht "zu hart" wird)
+                const float mix = 0.85f; // 0.7..0.95
+                for (int i = 0; i < 31; ++i)
+                {
+                    const float f = eqFreqs[(size_t)i];
+                    if (!isBass(f)) continue;
+
+                    residuals[(size_t)i] = (1.0f - mix) * residuals[(size_t)i] + mix * coarse[(size_t)i];
+                }
+
+                // 5) Solver zwingen: nur die 2 Extrem-Bänder im Bass sollen "frei" sein
+                // Alle anderen Bass-Bänder bekommen Zusatz-Penalty -> bleiben näher an 0 dB Gain.
+                for (int i = 0; i < 31; ++i)
+                {
+                    const float f = eqFreqs[(size_t)i];
+                    if (!isBass(f)) continue;
+
+                    if (i == idxMax || i == idxMin)
+                        extraPenalty[(size_t)i] = 0.05;  // fast frei
+                    else
+                        extraPenalty[(size_t)i] = 2.5;   // stärker "zu 0 drücken" (1.0..6.0)
+                }
+            }
 
             // Fit (etwas kleiner -> weniger Freeze/CPU)
             const int fitPoints = 350; // 250..400 ist sehr praxisnah
@@ -2574,17 +2750,31 @@ void AudioPluginAudioProcessorEditor::startAutoEqAsync()
                 targetDb.push_back(interpLogCurveDb(bandFreqs, residuals, f));
 
             // Stufe 1: Gains fitten (Q fix)
-            std::array<float, 31> gainsStage1 = fitGainsStage1(fitFreqs, targetDb, qFixed, sr, bandFreqs);
+            const std::array<double, 31>* penaltyPtr = hybridBass ? &extraPenalty : nullptr;
+
+            std::array<float, 31> gainsStage1 = fitGainsStage1(fitFreqs, targetDb, qFixed, sr, bandFreqs, penaltyPtr);
 
             // Stufe 2: Qs optimieren (gegen Ripple)
             std::array<float, 31> qStage2 = fitQsStage2_Coordinate(fitFreqs, targetDb, gainsStage1, qFixed, sr, bandFreqs);
+
+            if (hybridBass)
+            {
+                // Nur die 2 aktiven Bassbänder wirklich breit (kleines Q)
+                if (idxMax >= 0) qStage2[(size_t)idxMax] = juce::jlimit(0.6f, 1.4f, qStage2[(size_t)idxMax]);
+                if (idxMin >= 0) qStage2[(size_t)idxMin] = juce::jlimit(0.6f, 1.4f, qStage2[(size_t)idxMin]);
+
+                // Restliche Bassbänder notfalls auch nicht zu schmal werden lassen
+                for (int i = 0; i < 31; ++i)
+                    if (eqFreqs[(size_t)i] >= 40.0f && eqFreqs[(size_t)i] <= 400.0f)
+                        qStage2[(size_t)i] = juce::jmin(qStage2[(size_t)i], 2.0f);
+            }
 
             // Q hard limits (Basis)
             for (auto& q : qStage2)
                 q = juce::jlimit(0.6f, 6.0f, q);
 
             // Danach: Gains nochmal fitten mit neuen Qs
-            std::array<float, 31> finalGains = fitGainsStage1(fitFreqs, targetDb, qStage2, sr, bandFreqs);
+            std::array<float, 31> finalGains = fitGainsStage1(fitFreqs, targetDb, qStage2, sr, bandFreqs, penaltyPtr);
 
             // Optional: Q abhängig von Gain begrenzen
             for (int i = 0; i < 31; ++i)
@@ -2600,10 +2790,10 @@ void AudioPluginAudioProcessorEditor::startAutoEqAsync()
             }
 
             // WICHTIG: Nach Q-Begrenzung Gains nochmal refitten, sonst passt’s nicht mehr!
-            finalGains = fitGainsStage1(fitFreqs, targetDb, qStage2, sr, bandFreqs);
+            finalGains = fitGainsStage1(fitFreqs, targetDb, qStage2, sr, bandFreqs, penaltyPtr);
 
             // === Makeup Gain so berechnen, dass (Meas + offset + EQResponse) wieder zur Referenz passt ===
-// 1) EQ-Response in dB auf fitFreqs berechnen
+            // 1) EQ-Response in dB auf fitFreqs berechnen
             std::vector<float> respDb;
             computeEQResponseDb(fitFreqs, finalGains, qStage2, sr, respDb, bandFreqs);
 
@@ -2643,24 +2833,31 @@ void AudioPluginAudioProcessorEditor::startAutoEqAsync()
             juce::MessageManager::callAsync([safe = safeEditor,
                 finalGains,
                 finalQs = qStage2,
+                residualsArr,
                 makeupDeltaDb,
                 inputGainBefore]() mutable
                 {
                     if (safe == nullptr)
                         return;
 
+                    // 1) Zielkurve (31 Punkte) speichern -> gestrichelt zeichnen (ohne Kammfilter!)
+                    safe->processorRef.targetResidualsDb = residualsArr;
+                    safe->processorRef.hasTargetResiduals = true;
+
+                    // 2) Dein bisheriges: fitted Gains speichern (falls du das weiter nutzt)
                     for (int i = 0; i < 31; ++i)
                         safe->processorRef.targetCorrections[i] = juce::jlimit(-12.0f, 12.0f, finalGains[(size_t)i]);
 
                     safe->processorRef.hasTargetCorrections = true;
-                    safe->autoEqRunning = false;
 
+                    // Qs/Gains/InputGain anwenden ...
                     applyQsToApvts(safe->processorRef, finalQs);
                     applyGainsToApvts(safe->processorRef, finalGains);
 
                     const float newInputGain = juce::jlimit(-24.0f, 24.0f, inputGainBefore + makeupDeltaDb);
                     applyInputGainToApvts(safe->processorRef, newInputGain);
 
+                    // UI wieder freigeben ...
                     safe->genreErkennenButton.setEnabled(true);
                     safe->genreErkennenButton.setButtonText("Messung starten");
                     safe->loadReferenceButton.setEnabled(true);
@@ -2668,6 +2865,7 @@ void AudioPluginAudioProcessorEditor::startAutoEqAsync()
                     safe->eqCurveToggleButton.setEnabled(true);
 
                     safe->repaint();
+                    safe->autoEqRunning.store(false);
                 });
 
             return jobHasFinished;
@@ -2993,17 +3191,51 @@ float AudioPluginAudioProcessorEditor::findMeasuredLevel(
  */
 void AudioPluginAudioProcessorEditor::drawTargetEQCurve(juce::Graphics& g)
 {
-    // Nur zeichnen wenn Korrekturen berechnet wurden
-    if (!processorRef.hasTargetCorrections)
+    if (!processorRef.hasTargetResiduals)
         return;
 
-    // Pfad erstellen
-    auto targetPath = buildTargetPath();
+    const float minFreq = 20.0f;
+    float sr = (float)processorRef.getSampleRate();
+    if (!(sr > 0.0f)) sr = 48000.0f;
+    const float maxFreq = juce::jmin(20000.0f, 0.5f * sr * 0.999f);
 
-    // Gestrichelte Kurve und Punkte zeichnen
-    drawDashedTargetCurve(g, targetPath);
-    drawTargetPoints(g);
+    const float minDb = -12.0f;
+    const float maxDb = 12.0f;
+
+    auto area = spectrumInnerArea.toFloat();
+
+    const int numPoints = 2000;
+    auto freqs = generateLogFrequencies(numPoints, minFreq, maxFreq);
+
+    // 31 Punkte -> Vector für Interpolator
+    std::vector<float> bandFreqs;
+    bandFreqs.reserve(31);
+    std::vector<float> bandDb;
+    bandDb.reserve(31);
+
+    for (int i = 0; i < 31; ++i)
+    {
+        bandFreqs.push_back(eqFrequencies[(size_t)i]);
+        bandDb.push_back(juce::jlimit(minDb, maxDb, processorRef.targetResidualsDb[(size_t)i]));
+    }
+
+    std::vector<float> targetDb;
+    targetDb.reserve(freqs.size());
+    for (auto f : freqs)
+        targetDb.push_back(juce::jlimit(minDb, maxDb, interpLogCurveDb(bandFreqs, bandDb, f)));
+
+    auto targetPath = buildResponsePath(area, freqs, targetDb, minFreq, maxFreq, minDb, maxDb);
+
+    juce::Path dashed;
+    float dashes[] = { 6.0f, 4.0f };
+    juce::PathStrokeType(2.0f).createDashedStroke(dashed, targetPath, dashes, 2);
+
+    g.setColour(juce::Colours::lime.withAlpha(0.9f));
+    g.strokePath(dashed, juce::PathStrokeType(2.0f));
 }
+
+
+
 
 //==============================================================================
 //               DRAW TARGET EQ CURVE HILFSFUNKTIONEN

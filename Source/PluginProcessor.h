@@ -13,7 +13,8 @@ namespace DisplayScale
 //==============================================================================
 // Hauptklasse des Plugins
 // Enthält EQ-Filter (31-Band), FFT-basiertes Spektrum und Parameterverwaltung
-class AudioPluginAudioProcessor final : public juce::AudioProcessor
+class AudioPluginAudioProcessor final : public juce::AudioProcessor,
+    private juce::AudioProcessorValueTreeState::Listener
 {
 public:
     //==============================================================================
@@ -105,6 +106,11 @@ public:
     std::atomic<bool> hasTargetCorrections{ false };
     int selectedGenreId = 0;                             // Ausgewähltes Genre im Dropdown
 
+    // ==== Target-Visualisierung (31 Punkte) ====
+    // Das ist die "Zielkurve" als 31 Residual-Punkte (ohne Filter-Response / ohne Ripple)
+    std::array<float, 31> targetResidualsDb{};
+    bool hasTargetResiduals = false;
+
     // Referenzkurve laden
     void loadReferenceCurve(const juce::String& filename);
 
@@ -151,6 +157,10 @@ private:
         3150.0f, 4000.0f, 5000.0f, 6300.0f, 8000.0f, 10000.0f,
         12500.0f, 16000.0f, 20000.0f
     };
+
+    void parameterChanged(const juce::String& parameterID, float newValue) override;
+
+    std::atomic<bool> filtersNeedUpdate{ true };
 
     //==============================================================================
     // FFT / Spectrum Analyzer (Post-EQ für Anzeige)

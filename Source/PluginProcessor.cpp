@@ -25,6 +25,12 @@ AudioPluginAudioProcessor::AudioPluginAudioProcessor()
 
     // Target Corrections initialisieren
     targetCorrections.fill(0.0f);
+
+    for (int i = 0; i < numBands; ++i)
+    {
+        apvts.addParameterListener("band" + juce::String(i), this);
+        apvts.addParameterListener("bandQ" + juce::String(i), this);
+    }
 }
 
 //==============================================================================
@@ -37,6 +43,12 @@ AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
     juce::zeromem(scopeData, sizeof(scopeData));
     juce::zeromem(preEQFifo, sizeof(preEQFifo));
     juce::zeromem(preEQFftData, sizeof(preEQFftData));
+    
+    for (int i = 0; i < numBands; ++i)
+    {
+        apvts.removeParameterListener("band" + juce::String(i), this);
+        apvts.removeParameterListener("bandQ" + juce::String(i), this);
+    }
 }
 
 //==============================================================================
@@ -197,8 +209,8 @@ void AudioPluginAudioProcessor::updateFilters()
         );
 
         // Filter aktualisieren
-        *leftFilters[i].coefficients = *coeffs;
-        *rightFilters[i].coefficients = *coeffs;
+        leftFilters[i].coefficients = coeffs;
+        rightFilters[i].coefficients = coeffs;
     }
 }
 
@@ -257,12 +269,14 @@ bool AudioPluginAudioProcessor::isBusesLayoutSupported(const BusesLayout& layout
 // Audio-Block verarbeiten
 void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
+    if (filtersNeedUpdate.exchange(false, std::memory_order_acq_rel))
+        updateFilters();
+
     // Input Gain anwenden
     float inputGainDb = apvts.getRawParameterValue("inputGain")->load();
     float inputGainLinear = juce::Decibels::decibelsToGain(inputGainDb);
 
     juce::ignoreUnused(midiMessages);
-    updateFilters(); // Sicherstellen, dass Filter auf aktuelle Parameter reagieren
     juce::ScopedNoDenormals noDenormals;
 
     auto totalNumInputChannels = getTotalNumInputChannels();
@@ -385,11 +399,11 @@ void AudioPluginAudioProcessor::pushNextSampleIntoPreEQFifo(float sample) noexce
 {
     if (preEQFifoIndex == fftSize)
     {
-        if (!nextPreEQFFTBlockReady)
+        if (!nextPreEQFFTBlockReady.load())
         {
             juce::zeromem(preEQFftData, sizeof(preEQFftData));
             memcpy(preEQFftData, preEQFifo, sizeof(preEQFifo));
-            nextPreEQFFTBlockReady = true; // Signalisiert, dass Pre-EQ FFT-Daten bereit sind
+            nextPreEQFFTBlockReady.store(true); // Signalisiert, dass Pre-EQ FFT-Daten bereit sind
         }
         preEQFifoIndex = 0;
     }
@@ -418,7 +432,6 @@ void AudioPluginAudioProcessor::updateSpectrumArray(double sampleRate)
     };
 
     // Amplituden normieren
-    const float fftNorm = (float)fftSize;
     const float binWidth = sampleRate / (float)fftSize;
 
     for (float centerFreq : thirdOctaveCenterFreqs)
@@ -445,28 +458,25 @@ void AudioPluginAudioProcessor::updateSpectrumArray(double sampleRate)
         if (upperBin < lowerBin)
             continue;
 
-        // Energie über alle Bins im Band summieren
-        float bandEnergy = 0.0f;
+        // --- Magnitude über alle Bins mitteln (wie offline) ---
+        float sumMag = 0.0f;
         int binCount = 0;
 
         for (int bin = lowerBin; bin <= upperBin; ++bin)
         {
-            float mag = fftData[bin] / fftNorm;
-            bandEnergy += mag * mag; // Energie = Amplitude²
-            binCount++;
+            sumMag += fftData[bin];   // fftData[bin] ist bereits Magnitude (JUCE)
+            ++binCount;
         }
 
-        // Mittlere Energie und zurück zu Amplitude
-        if (binCount > 0)
-            bandEnergy /= binCount;
+        float magRaw = (binCount > 0) ? (sumMag / (float)binCount) : 0.0f;
 
-        float bandMagnitude = std::sqrt(bandEnergy);
+        // gleiche Skalierung wie offline: 2/fftSize
+        float mag = magRaw * (2.0f / (float)fftSize);
 
         // In dB umrechnen
         const float floorDb = -160.0f;
-        float dbFs = juce::Decibels::gainToDecibels(bandMagnitude, floorDb);
+        float dbFs = juce::Decibels::gainToDecibels(mag, floorDb);
 
-        // Speichern
         spectrumArray.push_back({ centerFreq, dbFs });
     }
 }
@@ -518,27 +528,21 @@ void AudioPluginAudioProcessor::updatePreEQSpectrumArray(double sampleRate)
             continue;
 
         // Energie über alle Bins im Band summieren
-        float bandEnergy = 0.0f;
+        float sumMag = 0.0f;
         int binCount = 0;
 
         for (int bin = lowerBin; bin <= upperBin; ++bin)
         {
-            float mag = preEQFftData[bin] / fftNorm;
-            bandEnergy += mag * mag;
-            binCount++;
+            sumMag += preEQFftData[bin];
+            ++binCount;
         }
 
-        // Mittlere Energie und zurück zu Amplitude
-        if (binCount > 0)
-            bandEnergy /= binCount;
+        float magRaw = (binCount > 0) ? (sumMag / (float)binCount) : 0.0f;
+        float mag = magRaw * (2.0f / (float)fftSize);
 
-        float bandMagnitude = std::sqrt(bandEnergy);
-
-        // In dB umrechnen
         const float floorDb = -160.0f;
-        float dbFs = juce::Decibels::gainToDecibels(bandMagnitude, floorDb);
+        float dbFs = juce::Decibels::gainToDecibels(mag, floorDb);
 
-        // Speichern
         preEQSpectrumArray.push_back({ centerFreq, dbFs });
     }
 }
@@ -553,6 +557,11 @@ bool AudioPluginAudioProcessor::hasEditor() const
 juce::AudioProcessorEditor* AudioPluginAudioProcessor::createEditor()
 {
     return new AudioPluginAudioProcessorEditor(*this);
+}
+
+void AudioPluginAudioProcessor::parameterChanged(const juce::String&, float)
+{
+    filtersNeedUpdate.store(true, std::memory_order_release);
 }
 
 //==============================================================================
