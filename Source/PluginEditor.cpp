@@ -346,6 +346,9 @@ void AudioPluginAudioProcessorEditor::updateMeasurementButtonEnabledState()
 {
     const bool hasGenre = (genreBox.getSelectedId() != 0);
     const bool hasReference = !processorRef.referenceBands.empty();
+    const auto disabledCol = juce::Colour::fromString("ff2a2d31");
+    const auto readyGreen = juce::Colour::fromString("ff2ecc71");
+    const auto recordRed = juce::Colour::fromString("ffe74c3c");
 
     const bool enable = hasGenre || hasReference;
 
@@ -368,7 +371,7 @@ void AudioPluginAudioProcessorEditor::updateMeasurementButtonEnabledState()
  */
 void AudioPluginAudioProcessorEditor::initializeWindow()
 {
-    setSize(1000, 690);
+    setSize(1000, 680);
     setResizable(false, false);
 }
 
@@ -896,6 +899,12 @@ void AudioPluginAudioProcessorEditor::setupEQSliders()
         eqSlider[i].setValue(0.0);
         eqSlider[i].setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
 
+        // Popup wie Tooltip (nur beim Drag anzeigen)
+        eqSlider[i].setPopupDisplayEnabled(false, true, this);
+        eqSlider[i].setNumDecimalPlacesToDisplay(1);
+        eqSlider[i].setTextValueSuffix(" dB");
+        eqSlider[i].setPopupDisplayEnabled(true, true, this);
+
         // Farben setzen
         eqSlider[i].setColour(juce::Slider::thumbColourId, juce::Colours::white);
         eqSlider[i].setColour(juce::Slider::trackColourId, juce::Colours::lightgrey);
@@ -923,6 +932,8 @@ void AudioPluginAudioProcessorEditor::setupQKnobs()
         eqKnob[i].setRange(0.3, 10.0, 0.01);
         eqKnob[i].setValue(4.32);  // Standard Q-Wert für 1/3-Oktav-EQ
         eqKnob[i].setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        eqKnob[i].setPopupDisplayEnabled(false, true, this);
+        eqKnob[i].setNumDecimalPlacesToDisplay(2);
 
         // Farben setzen
         eqKnob[i].setColour(juce::Slider::thumbColourId, juce::Colours::white);
@@ -964,6 +975,8 @@ void AudioPluginAudioProcessorEditor::paint(juce::Graphics& g)
     drawSpectrumArea(g);
     drawFrequencyGrid(g);
     drawEQAreas(g);
+    drawEQFaderDbScale(g);
+    drawEQFaderDbGuideLines(g);
     drawEQLabels(g);
 }
 
@@ -1050,6 +1063,23 @@ void AudioPluginAudioProcessorEditor::drawSpectrumArea(juce::Graphics& g)
             drawReferenceBands(g, minFreq, maxFreq, displayMinDb, displayMaxDb);
         }
     }
+    // --- Frame-Linien für Spektrum (oben/unten), damit es "geschlossen" wirkt ---
+    {
+        const int x1 = spectrumInnerArea.getX();
+        const int x2 = spectrumInnerArea.getRight();
+
+        const int yTop = spectrumInnerArea.getY();
+        const int yBot = spectrumInnerArea.getBottom();
+
+        g.setColour(juce::Colours::white.withAlpha(0.5f)); // fein, wie TBC
+
+        // obere Linie
+        g.drawLine((float)x1, (float)yTop, (float)x2, (float)yTop, 1.0f);
+
+        // untere Linie
+        g.drawLine((float)x1, (float)yBot, (float)x2, (float)yBot, 1.0f);
+    }
+
     if (showEQCurve)
         drawEQDbGridLabels(g);
 }
@@ -1273,19 +1303,16 @@ void AudioPluginAudioProcessorEditor::drawEQDbGridLabels(juce::Graphics& g)
 void AudioPluginAudioProcessorEditor::drawEQAreas(juce::Graphics& g)
 {
     // EQ Sliderbereich (blau)
-    g.setColour(Theme::bgDeep);
+    g.setColour(Theme::bgPanel);
     g.fillRect(eqArea);
 
     // Q-Knob-Bereich (hellgrün)
-    g.setColour(Theme::bgDeep);
+    g.setColour(Theme::bgPanel);
     g.fillRect(eqKnobArea);
 
     // EQ Beschriftungsbereich (rot)
-    g.setColour(Theme::bgDeep);
+    g.setColour(Theme::bgPanel);
     g.fillRect(eqLabelArea);
-
-    // Trennlinie
-    g.setColour(Theme::separator.withAlpha(1.0f));
 }
 
 /**
@@ -1333,6 +1360,189 @@ void AudioPluginAudioProcessorEditor::drawEQLabels(juce::Graphics& g)
             juce::Justification::centred,
             1
         );
+    }
+}
+
+void AudioPluginAudioProcessorEditor::drawEQFaderDbScale(juce::Graphics& g)
+{
+    // Wir brauchen Slider-Bounds (also nach resized() vorhanden)
+    const int leftIdx = 0;
+    const int rightIdx = 30;
+
+    const auto& sL = eqSlider[leftIdx];
+    const auto& sR = eqSlider[rightIdx];
+
+    if (sL.getWidth() <= 0 || sR.getWidth() <= 0)
+        return;
+
+    // Werte, die du willst: +12, +6, "dB" bei 0, -6, -12
+    struct Tick { float db; const char* text; };
+    const Tick ticks[] =
+    {
+        {  12.0f, "12" },
+        {   6.0f, "6"  },
+        {   0.0f, "dB" },
+        {  -6.0f, "-6" },
+        { -12.0f, "-12"}
+    };
+
+    // Y-Position exakt aus Slider-Skala (lokal -> global)
+    auto yForDb = [](const juce::Slider& s, float db)
+        {
+            const double localPos = s.getPositionOfValue(db); // Pixel im Slider (local)
+            return (float)s.getY() + (float)localPos;
+        };
+
+    // Layout der Textboxen links/rechts
+    const int labelW = 34;
+    const int labelH = 16;
+    const int pad = 6;
+
+    int leftX = sL.getX() - pad - labelW;
+    int rightX = sR.getRight() + pad;
+
+    // falls links zu knapp ist, clampen
+    leftX = juce::jmax(0, leftX);
+    rightX = juce::jmin(getWidth() - labelW, rightX);
+
+    g.setColour(juce::Colours::white.withAlpha(0.5f));
+    g.setFont(12.0f);
+
+    for (const auto& t : ticks)
+    {
+        const float yL = yForDb(sL, t.db);
+        const float yR = yForDb(sR, t.db);
+
+        g.drawFittedText(t.text,
+            leftX, (int)std::round(yL - labelH * 0.5f),
+            labelW, labelH,
+            juce::Justification::centred, 1);
+
+        g.drawFittedText(t.text,
+            rightX, (int)std::round(yR - labelH * 0.5f),
+            labelW, labelH,
+            juce::Justification::centred, 1);
+    }
+}
+
+void AudioPluginAudioProcessorEditor::drawEQFaderDbGuideLines(juce::Graphics& g)
+{
+    const int leftIdx = 0;
+    const int rightIdx = 30;
+
+    const auto& sL = eqSlider[leftIdx];
+    const auto& sR = eqSlider[rightIdx];
+
+    if (sL.getWidth() <= 0 || sR.getWidth() <= 0)
+        return;
+
+    struct Tick { float db; };
+    const Tick ticks[] =
+    {
+        {  12.0f },
+        {   6.0f },
+        {   0.0f }, // "dB" / Null-Linie
+        {  -6.0f },
+        { -12.0f }
+    };
+
+    auto yForDb = [](const juce::Slider& s, float db)
+        {
+            const double localPos = s.getPositionOfValue(db);
+            float y = (float)s.getY() + (float)localPos;
+
+            // Safety: im Sliderbereich halten
+            const float top = (float)s.getY() + 1.0f;
+            const float bot = (float)s.getBottom() - 1.0f;
+            return juce::jlimit(top, bot, y);
+        };
+
+    // Linien nur im Slider-Bereich (eqArea) zeichnen
+    juce::Graphics::ScopedSaveState ss(g);
+    g.reduceClipRegion(eqArea);
+
+    g.setColour(juce::Colours::white.withAlpha(0.5f));
+    g.setFont(12.0f);
+
+    const float xMin = (float)eqArea.getX();
+    const float xMax = (float)eqArea.getRight();
+
+    // Wie viel Abstand um jeden Fader ausgespart werden soll
+    const int gapPad = 3;
+
+    // Für jede Linie: wir bauen Ausschlussbereiche (x-ranges) um jeden Slider
+    for (const auto& t : ticks)
+    {
+        const float y = yForDb(sL, t.db);
+
+        // Sammle alle "Lücken" (exclusion ranges) entlang X
+        struct Range { float a, b; };
+        std::vector<Range> gaps;
+        gaps.reserve(31);
+
+        for (int i = 0; i < 31; ++i)
+        {
+            auto r = eqSlider[i].getBounds().expanded(gapPad, 0);
+
+            float a = (float)r.getX();
+            float b = (float)r.getRight();
+
+            // clamp in unseren Zeichenbereich
+            a = juce::jlimit(xMin, xMax, a);
+            b = juce::jlimit(xMin, xMax, b);
+
+            if (b > a)
+                gaps.push_back({ a, b });
+        }
+
+        // sort + merge (damit keine Doppel-Lücken entstehen)
+        std::sort(gaps.begin(), gaps.end(), [](const Range& r1, const Range& r2) { return r1.a < r2.a; });
+
+        std::vector<Range> merged;
+        for (const auto& r : gaps)
+        {
+            if (merged.empty() || r.a > merged.back().b)
+                merged.push_back(r);
+            else
+                merged.back().b = std::max(merged.back().b, r.b);
+        }
+
+        // Wenn wir mind. links+rechts einen Gap haben, begrenzen wir den Zeichenbereich:
+// Start = Ende des ersten (linken) Gaps, Ende = Anfang des letzten (rechten) Gaps.
+// Dadurch gibt es KEINE Linie zwischen Rand und erstem/letztem Fader.
+        if (merged.size() < 2)
+            continue;
+
+        const float drawStart = merged.front().b; // nach linkem Fader
+        const float drawEnd = merged.back().a;  // vor rechtem Fader
+
+        if (drawEnd <= drawStart + 1.0f)
+            continue;
+
+        float curX = drawStart;
+
+        for (const auto& m : merged)
+        {
+            // Alles links vom drawStart ignorieren
+            if (m.b <= drawStart)
+                continue;
+
+            // Wenn der nächste Gap schon rechts von drawEnd liegt -> fertig
+            if (m.a >= drawEnd)
+                break;
+
+            const float segEnd = juce::jlimit(drawStart, drawEnd, m.a);
+
+            if (segEnd > curX + 1.0f)
+                g.drawLine(curX, y, segEnd, y, 1.0f);
+
+            curX = std::max(curX, m.b);
+        }
+
+        // Letztes Segment nur bis drawEnd (NICHT bis zum Rand)
+        if (drawEnd > curX + 1.0f)
+            g.drawLine(curX, y, drawEnd, y, 1.0f);
+
     }
 }
 

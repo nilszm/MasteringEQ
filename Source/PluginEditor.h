@@ -45,6 +45,8 @@ private:
     void drawEQLabels(juce::Graphics& g);
     void drawEQDbGridLines(juce::Graphics& g);
     void drawEQDbGridLabels(juce::Graphics& g);
+    void drawEQFaderDbScale(juce::Graphics& g);
+    void drawEQFaderDbGuideLines(juce::Graphics& g);
 
     // ============================================================================
 // Diese Funktionsdeklarationen in PluginEditor.h einfügen (private Bereich):
@@ -94,7 +96,6 @@ private:
 
     float computeReferenceViewOffsetDb(
         const std::vector<AudioPluginAudioProcessor::SpectrumPoint>& spectrum) const;
-
 
     // drawEQCurve Hilfsfunktionen
     std::vector<float> generateLogFrequencies(int numPoints, float minFreq, float maxFreq);
@@ -256,8 +257,8 @@ private:
     static constexpr int topBarHeight = 40;
     static constexpr int spectrogramOuterHeight = 430;
     static constexpr int spectrogramMargin = 10;
-    static constexpr int eqLabelHeight = 30;
-    static constexpr int eqSpacerHeight = 40;
+    static constexpr int eqLabelHeight = 22;
+    static constexpr int eqSpacerHeight = 20;
     static constexpr int eqHeight = 180 + eqSpacerHeight;
     static constexpr int spectrumHeight = 390;
     static constexpr int spectrumBottomMargin = 20;
