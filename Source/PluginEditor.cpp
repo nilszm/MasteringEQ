@@ -19,20 +19,79 @@
 #include <cstring>
 #include <cmath>
 #include <array>
+#include <vector>
 
-// Farben
+ // Farben
 namespace Theme
 {
+    static const juce::Colour curveMeasured = juce::Colour(0xff33E0FF); // cyan
+    static const juce::Colour curveEQ = juce::Colour(0xffFF4B9A); // hot pink
+    static const juce::Colour curveTarget = juce::Colour(0xffFF375F); // neon red/pink
+
+    static const juce::Colour refBandFill = juce::Colour(0xff0FBAC4).withAlpha(0.18f); // teal band fill
+    static const juce::Colour refBandEdge = juce::Colour(0xff0FBAC4).withAlpha(0.55f); // p10/p90 outlines
+    static const juce::Colour refMedian = juce::Colour(0xffD9F7FF).withAlpha(0.90f); // median line
+
     static const juce::Colour bgDeep = juce::Colour(0xff101010); // #101010
     static const juce::Colour bgPanel = juce::Colour(0xff161616); // leicht heller
     static const juce::Colour bgPanel2 = juce::Colour(0xff181818); // minimal heller (Knob area)
     static const juce::Colour separator = juce::Colour(0xff262626); // Linien/Kanten
+
+    // ---- Unified Controls ----
+    static const juce::Colour controlBg = juce::Colour(0xff1b1d21);                 // Buttons/Combo
+    static const juce::Colour controlBgOn = juce::Colour(0xff252a31);                 // Toggle "on"
+    static const juce::Colour controlText = juce::Colours::white.withAlpha(0.88f);
+
+    static const juce::Colour disabledBg = juce::Colour(0xff2a2d31);
+    static const juce::Colour disabledText = juce::Colours::white.withAlpha(0.35f);
+
+    // Statusfarben Messung
+    static const juce::Colour readyGreen = juce::Colour(0xff2ecc71);
+    static const juce::Colour recordRed = juce::Colour(0xffe74c3c);
 }
 
+namespace
+{
+    static void applyUnifiedButtonStyle(juce::TextButton& b,
+        juce::Colour base,
+        bool isToggleButton = false)
+    {
+        b.setColour(juce::TextButton::buttonColourId, base);
 
- //==============================================================================
- //                           Max-Correction
- //==============================================================================
+        // Bei Toggle-Buttons wird buttonOnColourId sichtbar, bei normalen Buttons nur wenn "on".
+        const auto onCol = isToggleButton ? Theme::controlBgOn : base.brighter(0.10f);
+        b.setColour(juce::TextButton::buttonOnColourId, onCol);
+
+        b.setColour(juce::TextButton::textColourOffId, Theme::controlText);
+        b.setColour(juce::TextButton::textColourOnId, Theme::controlText);
+    }
+
+    static void applyUnifiedComboStyle(juce::ComboBox& cb)
+    {
+        cb.setColour(juce::ComboBox::backgroundColourId, Theme::controlBg);
+        cb.setColour(juce::ComboBox::textColourId, Theme::controlText);
+        cb.setColour(juce::ComboBox::outlineColourId, juce::Colours::white.withAlpha(0.12f));
+        cb.setColour(juce::ComboBox::arrowColourId, Theme::controlText.withAlpha(0.75f));
+    }
+
+    static void setButtonDisabledStyle(juce::TextButton& b, bool disabled)
+    {
+        if (disabled)
+        {
+            b.setColour(juce::TextButton::buttonColourId, Theme::disabledBg);
+            b.setColour(juce::TextButton::textColourOffId, Theme::disabledText);
+        }
+        else
+        {
+            // Text wieder normal
+            b.setColour(juce::TextButton::textColourOffId, Theme::controlText);
+        }
+    }
+}
+
+//==============================================================================
+//                           Max-Correction
+//==============================================================================
 
 namespace
 {
@@ -162,9 +221,9 @@ namespace
     }
 }
 
- //==============================================================================
- //                           Log-Interpolation
- //==============================================================================
+//==============================================================================
+//                           Log-Interpolation
+//==============================================================================
 
 namespace
 {
@@ -234,10 +293,10 @@ namespace
     }
 }
 
- //==============================================================================
- //                               Smoothing
- //==============================================================================
- 
+//==============================================================================
+//                               Smoothing
+//==============================================================================
+
 namespace
 {
     static std::vector<float> smoothResiduals3(const std::vector<float>& r)
@@ -255,18 +314,18 @@ namespace
     }
 }
 
- //==============================================================================
- //                              KONSTRUKTOR
- //==============================================================================
+//==============================================================================
+//                              KONSTRUKTOR
+//==============================================================================
 
- /**
-  * @brief Konstruktor des Plugin-Editors.
-  *
-  * Initialisiert alle UI-Komponenten und startet den Timer für die
-  * Spektrum-Aktualisierung mit 30 Hz.
-  *
-  * @param p Referenz auf den Audio-Processor
-  */
+/**
+ * @brief Konstruktor des Plugin-Editors.
+ *
+ * Initialisiert alle UI-Komponenten und startet den Timer für die
+ * Spektrum-Aktualisierung mit 30 Hz.
+ *
+ * @param p Referenz auf den Audio-Processor
+ */
 AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor(AudioPluginAudioProcessor& p)
     : AudioProcessorEditor(&p), processorRef(p)
 {
@@ -346,22 +405,40 @@ void AudioPluginAudioProcessorEditor::updateMeasurementButtonEnabledState()
 {
     const bool hasGenre = (genreBox.getSelectedId() != 0);
     const bool hasReference = !processorRef.referenceBands.empty();
-    const auto disabledCol = juce::Colour::fromString("ff2a2d31");
-    const auto readyGreen = juce::Colour::fromString("ff2ecc71");
-    const auto recordRed = juce::Colour::fromString("ffe74c3c");
-
     const bool enable = hasGenre || hasReference;
 
     genreErkennenButton.setEnabled(enable);
 
-    // Optional: Wenn disabled und gerade gemessen wird -> Messung beenden
-    if (!enable && processorRef.isMeasuring())
+    if (!enable)
     {
-        processorRef.stopMeasurement();
+        // disabled look
+        applyUnifiedButtonStyle(genreErkennenButton, Theme::disabledBg);
+        setButtonDisabledStyle(genreErkennenButton, true);
+
+        // Falls disabled und gerade gemessen wird -> sauber stoppen
+        if (processorRef.isMeasuring())
+        {
+            processorRef.stopMeasurement();
+            genreErkennenButton.setButtonText("Messung starten");
+        }
+        return;
+    }
+
+    // enabled look (abhängig davon ob gerade aufgenommen wird)
+    setButtonDisabledStyle(genreErkennenButton, false);
+
+    if (processorRef.isMeasuring())
+    {
+        genreErkennenButton.setButtonText("Messung stoppen");
+        applyUnifiedButtonStyle(genreErkennenButton, Theme::recordRed);
+    }
+    else
+    {
         genreErkennenButton.setButtonText("Messung starten");
-        genreErkennenButton.setColour(juce::TextButton::buttonColourId, juce::Colours::grey);
+        applyUnifiedButtonStyle(genreErkennenButton, Theme::readyGreen);
     }
 }
+
 
 /**
  * @brief Initialisiert die Fenstereinstellungen.
@@ -378,7 +455,7 @@ void AudioPluginAudioProcessorEditor::initializeWindow()
 void AudioPluginAudioProcessorEditor::setupLoadReferenceButton()
 {
     loadReferenceButton.setButtonText("Referenz laden");
-    loadReferenceButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
+    applyUnifiedButtonStyle(loadReferenceButton, Theme::controlBg);
 
     loadReferenceButton.onClick = [this]
         {
@@ -747,6 +824,7 @@ void AudioPluginAudioProcessorEditor::setupGenreDropdown()
         genreBox.setSelectedId(processorRef.selectedGenreId, juce::dontSendNotification);
     }
     updateMeasurementButtonEnabledState();
+    applyUnifiedComboStyle(genreBox);
     addAndMakeVisible(genreBox);
 }
 
@@ -761,7 +839,8 @@ void AudioPluginAudioProcessorEditor::setupGenreDropdown()
 void AudioPluginAudioProcessorEditor::setupMeasurementButton()
 {
     genreErkennenButton.setButtonText("Messung starten");
-    genreErkennenButton.setColour(juce::TextButton::buttonColourId, juce::Colours::grey);
+    applyUnifiedButtonStyle(genreErkennenButton, Theme::disabledBg);
+    setButtonDisabledStyle(genreErkennenButton, true);
 
     genreErkennenButton.onClick = [this]
         {
@@ -771,7 +850,7 @@ void AudioPluginAudioProcessorEditor::setupMeasurementButton()
                 processorRef.stopMeasurement();
 
                 genreErkennenButton.setButtonText("Messung starten");
-                genreErkennenButton.setColour(juce::TextButton::buttonColourId, juce::Colours::grey);
+                applyUnifiedButtonStyle(genreErkennenButton, Theme::readyGreen);
 
                 // Auto-EQ berechnen wenn Referenzkurve vorhanden
                 if (!processorRef.referenceBands.empty())
@@ -798,7 +877,7 @@ void AudioPluginAudioProcessorEditor::setupMeasurementButton()
             processorRef.startMeasurement();
 
             genreErkennenButton.setButtonText("Messung stoppen");
-            genreErkennenButton.setColour(juce::TextButton::buttonColourId, juce::Colours::green);
+            applyUnifiedButtonStyle(genreErkennenButton, Theme::recordRed);
 
             repaint();
         };
@@ -816,6 +895,8 @@ void AudioPluginAudioProcessorEditor::setupResetButton()
 {
     resetButton.setButtonText("Reset");
     resetButton.setColour(juce::TextButton::buttonColourId, juce::Colours::red);
+    resetButton.setColour(juce::TextButton::textColourOffId, Theme::controlText);
+    resetButton.setColour(juce::TextButton::textColourOnId, Theme::controlText);
 
     resetButton.onClick = [this]
         {
@@ -864,6 +945,8 @@ void AudioPluginAudioProcessorEditor::setupEQCurveToggle()
     eqCurveToggleButton.setButtonText("EQ Ansicht");
     eqCurveToggleButton.setClickingTogglesState(true);
     eqCurveToggleButton.setToggleState(false, juce::dontSendNotification);
+    applyUnifiedButtonStyle(eqCurveToggleButton, Theme::controlBg, true);
+
 
     eqCurveToggleButton.onClick = [this]
         {
@@ -956,18 +1039,18 @@ void AudioPluginAudioProcessorEditor::setupQKnobs()
  * Lautheitsanpassung verwendet.
  */
 
-//==============================================================================
-//                            PAINT-FUNKTION
-//==============================================================================
+ //==============================================================================
+ //                            PAINT-FUNKTION
+ //==============================================================================
 
-/**
- * @brief Hauptzeichenfunktion des Editors.
- *
- * Wird automatisch von JUCE aufgerufen wenn das Fenster neu
- * gezeichnet werden muss. Delegiert an spezialisierte Draw-Funktionen.
- *
- * @param g Der Graphics-Kontext zum Zeichnen
- */
+ /**
+  * @brief Hauptzeichenfunktion des Editors.
+  *
+  * Wird automatisch von JUCE aufgerufen wenn das Fenster neu
+  * gezeichnet werden muss. Delegiert an spezialisierte Draw-Funktionen.
+  *
+  * @param g Der Graphics-Kontext zum Zeichnen
+  */
 void AudioPluginAudioProcessorEditor::paint(juce::Graphics& g)
 {
     drawTopBar(g);
@@ -1099,66 +1182,113 @@ void AudioPluginAudioProcessorEditor::drawSpectrumArea(juce::Graphics& g)
 void AudioPluginAudioProcessorEditor::drawReferenceBands(juce::Graphics& g,
     float minFreq, float maxFreq, float displayMinDb, float displayMaxDb)
 {
-    // Pfade für die drei Referenzlinien
-    juce::Path pathP10;
-    juce::Path pathP90;
-    juce::Path pathMedian;
-    bool firstPoint = true;
+    // ==============================
+    //   Build Points (P10 / Median / P90)
+    // ==============================
+
+    if (processorRef.referenceBands.size() < 2)
+        return;
 
     auto clampDb = [&](float db)
         {
             return juce::jlimit(displayMinDb, displayMaxDb, db);
         };
 
-    // Durch alle Referenzbänder iterieren und Pfade aufbauen
+    std::vector<juce::Point<float>> p10Pts;
+    std::vector<juce::Point<float>> p90Pts;
+    std::vector<juce::Point<float>> medPts;
+
+    p10Pts.reserve(processorRef.referenceBands.size());
+    p90Pts.reserve(processorRef.referenceBands.size());
+    medPts.reserve(processorRef.referenceBands.size());
+
     for (const auto& band : processorRef.referenceBands)
     {
-        // Frequenzbänder außerhalb der Darstellung überspringen
+        // ------------------------------
+        // Skip out-of-range bands
+        // ------------------------------
         if (band.freq < minFreq || band.freq > maxFreq)
             continue;
 
-        // X-Position: Frequenz logarithmisch auf Pixelposition abbilden
-        float normX = juce::mapFromLog10(band.freq, minFreq, maxFreq);
-        float x = spectrumInnerArea.getX() + normX * spectrumInnerArea.getWidth();
+        // ------------------------------
+        // X: log-frequency mapping
+        // ------------------------------
+        const float normX = juce::mapFromLog10(band.freq, minFreq, maxFreq);
+        const float x = (float)spectrumInnerArea.getX() + normX * (float)spectrumInnerArea.getWidth();
 
-        // Y-Positionen: dB-Werte auf Pixelpositionen abbilden (invertiert: oben = laut)
-        float yP10 = juce::jmap(clampDb(band.p10), displayMinDb, displayMaxDb,
+        // ------------------------------
+        // Y: dB mapping (top = louder)
+        // ------------------------------
+        const float yP10 = juce::jmap(clampDb(band.p10), displayMinDb, displayMaxDb,
             (float)spectrumInnerArea.getBottom(),
             (float)spectrumInnerArea.getY());
 
-        float yMedian = juce::jmap(clampDb(band.median), displayMinDb, displayMaxDb,
+        const float yMed = juce::jmap(clampDb(band.median), displayMinDb, displayMaxDb,
             (float)spectrumInnerArea.getBottom(),
             (float)spectrumInnerArea.getY());
 
-        float yP90 = juce::jmap(clampDb(band.p90), displayMinDb, displayMaxDb,
+        const float yP90 = juce::jmap(clampDb(band.p90), displayMinDb, displayMaxDb,
             (float)spectrumInnerArea.getBottom(),
             (float)spectrumInnerArea.getY());
 
-        // Pfade aufbauen
-        if (firstPoint)
-        {
-            pathP10.startNewSubPath(x, yP10);
-            pathP90.startNewSubPath(x, yP90);
-            pathMedian.startNewSubPath(x, yMedian);
-            firstPoint = false;
-        }
-        else
-        {
-            pathP10.lineTo(x, yP10);
-            pathP90.lineTo(x, yP90);
-            pathMedian.lineTo(x, yMedian);
-        }
+        p10Pts.push_back({ x, yP10 });
+        medPts.push_back({ x, yMed });
+        p90Pts.push_back({ x, yP90 });
     }
 
-    // Referenzlinien zeichnen
-    g.setColour(juce::Colours::blue.withAlpha(0.6f));
-    g.strokePath(pathP10, juce::PathStrokeType(1.5f));
+    if (p10Pts.size() < 2 || p90Pts.size() < 2 || medPts.size() < 2)
+        return;
 
-    g.setColour(juce::Colours::blue.withAlpha(0.6f));
-    g.strokePath(pathP90, juce::PathStrokeType(1.5f));
+    auto buildLinePath = [](const std::vector<juce::Point<float>>& pts)
+        {
+            juce::Path p;
+            p.startNewSubPath(pts[0]);
 
-    g.setColour(juce::Colours::grey);
-    g.strokePath(pathMedian, juce::PathStrokeType(2.0f));
+            for (size_t i = 1; i < pts.size(); ++i)
+                p.lineTo(pts[i]);
+
+            return p;
+        };
+
+    // ==============================
+    //   Build Filled Band (P10..P90)
+    // ==============================
+
+    juce::Path bandPath;
+
+    bandPath.startNewSubPath(p90Pts[0]);
+    for (size_t i = 1; i < p90Pts.size(); ++i)
+        bandPath.lineTo(p90Pts[i]);
+
+    for (size_t i = p10Pts.size(); i-- > 0; )
+        bandPath.lineTo(p10Pts[i]);
+
+    bandPath.closeSubPath();
+
+    // ------------------------------
+    // Fill band (TBC style)
+    // ------------------------------
+    g.setColour(Theme::refBandFill);
+    g.fillPath(bandPath);
+
+    // ==============================
+    //   Optional: Outlines (P10 / P90)
+    // ==============================
+
+    const auto p10Path = buildLinePath(p10Pts);
+    const auto p90Path = buildLinePath(p90Pts);
+    const auto medPath = buildLinePath(medPts);
+
+    g.setColour(Theme::refBandEdge);
+    g.strokePath(p10Path, juce::PathStrokeType(1.25f));
+    g.strokePath(p90Path, juce::PathStrokeType(1.25f));
+
+    // ==============================
+    //   Median Line (on top)
+    // ==============================
+
+    g.setColour(Theme::refMedian);
+    g.strokePath(medPath, juce::PathStrokeType(2.0f));
 }
 
 /**
@@ -1932,14 +2062,12 @@ void AudioPluginAudioProcessorEditor::drawSpectrumPath(
     // Farbe und Stärke je nach Ansichtsmodus
     if (showEQCurve)
     {
-        // Transparenter im EQ-Modus (Hintergrund)
-        g.setColour(juce::Colours::cyan.withAlpha(0.6f));
+        g.setColour(Theme::curveMeasured.withAlpha(0.55f));
         g.strokePath(spectrumPath, juce::PathStrokeType(1.5f));
     }
     else
     {
-        // Voll sichtbar im Spektrum-Modus
-        g.setColour(juce::Colours::cyan);
+        g.setColour(Theme::curveMeasured.withAlpha(0.95f));
         g.strokePath(spectrumPath, juce::PathStrokeType(2.0f));
     }
 }
@@ -2160,16 +2288,15 @@ void AudioPluginAudioProcessorEditor::drawEQPathWithFill(juce::Graphics& g, cons
     g.drawHorizontalLine((int)y0dB, area.getX(), area.getRight());
 
     // EQ Kurve zeichnen (gelb, 3px)
-    g.setColour(juce::Colours::yellow.withAlpha(0.9f));
+    g.setColour(Theme::curveEQ.withAlpha(0.92f));
     g.strokePath(eqPath, juce::PathStrokeType(3.0f));
 
-    // Gefüllten Bereich zwischen Kurve und 0dB-Linie zeichnen
     juce::Path filledPath = eqPath;
     filledPath.lineTo(area.getRight(), y0dB);
     filledPath.lineTo(area.getX(), y0dB);
     filledPath.closeSubPath();
 
-    g.setColour(juce::Colours::yellow.withAlpha(0.15f));
+    g.setColour(Theme::curveEQ.withAlpha(0.14f));
     g.fillPath(filledPath);
 }
 
@@ -3261,11 +3388,11 @@ void AudioPluginAudioProcessorEditor::applyAutoEQ()
 
     dbgMinMax("after amount", residuals);
 
-//======================
-//      Gains-Fit
-//======================
+    //======================
+    //      Gains-Fit
+    //======================
 
-// 1) Zielkurve (targetDb) auf dichtes Frequenzraster bringen
+    // 1) Zielkurve (targetDb) auf dichtes Frequenzraster bringen
     const int fitPoints = 600; // 400..1000 ist praxisnah, 2000 ist möglich aber langsamer
     auto fitFreqs = generateLogFrequencies(fitPoints, 20.0f, 20000.0f);
 
@@ -3579,7 +3706,7 @@ void AudioPluginAudioProcessorEditor::drawDashedTargetCurve(
     strokeType.createDashedStroke(dashedPath, targetPath, dashLengths, 2);
 
     // In Lime-Grün zeichnen
-    g.setColour(juce::Colours::lime.withAlpha(0.9f));
+    g.setColour(Theme::curveTarget.withAlpha(0.95f));
     g.fillPath(dashedPath);
 }
 
@@ -3605,7 +3732,7 @@ void AudioPluginAudioProcessorEditor::drawTargetPoints(juce::Graphics& g)
     const float minDb = -12.0f;
     const float maxDb = 12.0f;
 
-    g.setColour(juce::Colours::lime);
+    g.setColour(Theme::curveTarget.withAlpha(0.95f));
 
     for (int i = 0; i < 31; ++i)
     {
