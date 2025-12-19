@@ -43,7 +43,7 @@ AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
     juce::zeromem(scopeData, sizeof(scopeData));
     juce::zeromem(preEQFifo, sizeof(preEQFifo));
     juce::zeromem(preEQFftData, sizeof(preEQFftData));
-    
+
     for (int i = 0; i < numBands; ++i)
     {
         apvts.removeParameterListener("band" + juce::String(i), this);
@@ -348,10 +348,10 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
         }
     }
 
-//==========================================================================
-// POST-EQ FFT: Samples NACH den Filtern erfassen (für Anzeige)
-// Mono-Summe aus beiden Kanälen (L+R gemittelt)
-//==========================================================================
+    //==========================================================================
+    // POST-EQ FFT: Samples NACH den Filtern erfassen (für Anzeige)
+    // Mono-Summe aus beiden Kanälen (L+R gemittelt)
+    //==========================================================================
     {
         auto numSamples = buffer.getNumSamples();
         auto numChannels = getTotalNumInputChannels();
@@ -741,7 +741,7 @@ void AudioPluginAudioProcessor::loadReferenceCurve(const juce::String& filename)
 
         refFileBase = refFileBase.getParentDirectory();
     }
-    
+
     // Von der "build" Ebene aus laden
     juce::File refFile = refFileBase
         .getChildFile("ReferenceCurves")

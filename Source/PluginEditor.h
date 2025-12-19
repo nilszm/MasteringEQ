@@ -17,7 +17,7 @@ public:
     void paint(juce::Graphics&) override;
     void resized() override;
 
- 
+
 private:
     // Setup-Funktionen (aus Konstruktor ausgelagert)
     void initializeWindow();
@@ -85,9 +85,9 @@ private:
 
     void drawTargetPoints(juce::Graphics& g);
 
-// ============================================================================
-// Diese Funktionsdeklarationen in PluginEditor.h einfügen (private Bereich):
-// ============================================================================
+    // ============================================================================
+    // Diese Funktionsdeklarationen in PluginEditor.h einfügen (private Bereich):
+    // ============================================================================
 
 private:
     // Offset
@@ -257,7 +257,7 @@ private:
     static constexpr int topBarHeight = 40;
     static constexpr int spectrogramOuterHeight = 430;
     static constexpr int spectrogramMargin = 10;
-    static constexpr int eqLabelHeight = 22;
+    static constexpr int eqLabelHeight = 30;
     static constexpr int eqSpacerHeight = 20;
     static constexpr int eqHeight = 180 + eqSpacerHeight;
     static constexpr int spectrumHeight = 390;
