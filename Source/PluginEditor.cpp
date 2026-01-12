@@ -710,10 +710,13 @@ void AudioPluginAudioProcessorEditor::setupGenreDropdown()
     // Alle verfügbaren Genres hinzufügen
     genreBox.addItem("Pop", 1);
     genreBox.addItem("HipHop", 2);
-    genreBox.addItem("Rock", 3);
-    genreBox.addItem("EDM", 4);
-    genreBox.addItem("Klassik", 5);
-    genreBox.addItem("Test", 6);
+    genreBox.addItem("Jazz", 3);
+    genreBox.addItem("Klassik", 4);
+    genreBox.addItem("Metal", 5);
+    genreBox.addItem("RnB", 6);
+    genreBox.addItem("Rock", 7);
+    genreBox.addItem("EDM", 8);
+
 
     // Callback bei Genre-Auswahl: Lädt die entsprechende JSON-Referenzkurve
     genreBox.onChange = [this]
@@ -725,27 +728,35 @@ void AudioPluginAudioProcessorEditor::setupGenreDropdown()
             switch (id)
             {
             case 1:
-                processorRef.loadReferenceCurve("pop_neu.json");
+                processorRef.loadReferenceCurve("Pop_Referenz.json");
                 postProcessReferenceBands(processorRef.referenceBands);
                 break;
             case 2:
-                processorRef.loadReferenceCurve("HipHop.json");
+                processorRef.loadReferenceCurve("HipHop_Referenz.json");
                 postProcessReferenceBands(processorRef.referenceBands);
                 break;
             case 3:
-                processorRef.loadReferenceCurve("Rock.json");
+                processorRef.loadReferenceCurve("Jazz_Referenz.json");
                 postProcessReferenceBands(processorRef.referenceBands);
                 break;
             case 4:
-                processorRef.loadReferenceCurve("EDM.json");
+                processorRef.loadReferenceCurve("Klassik_Referenz.json");
                 postProcessReferenceBands(processorRef.referenceBands);
                 break;
             case 5:
-                processorRef.loadReferenceCurve("Klassik.json");
+                processorRef.loadReferenceCurve("Metal_Referenz.json");
                 postProcessReferenceBands(processorRef.referenceBands);
                 break;
             case 6:
-                processorRef.loadReferenceCurve("test.json");
+                processorRef.loadReferenceCurve("RnB_Referenz.json");
+                postProcessReferenceBands(processorRef.referenceBands);
+                break;
+            case 7:
+                processorRef.loadReferenceCurve("Rock_Referenz.json");
+                postProcessReferenceBands(processorRef.referenceBands);
+                break;
+            case 8:
+                processorRef.loadReferenceCurve("TechHouse_Referenz.json");
                 postProcessReferenceBands(processorRef.referenceBands);
                 break;
             default:
