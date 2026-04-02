@@ -723,43 +723,41 @@ AudioPluginAudioProcessor::getAveragedSpectrum() const
 // Referenzkurve laden
 void AudioPluginAudioProcessor::loadReferenceCurve(const juce::String& filename)
 {
-    // Speicher für Kurve leeren
     referenceBands.clear();
 
     if (filename.isEmpty())
         return;
 
-    // File laden
-    juce::File refFileBase = juce::File::getSpecialLocation(
+    juce::File pluginFile = juce::File::getSpecialLocation(
         juce::File::currentApplicationFile);
 
-    // Solange im Pfad nach oben gehen, bis "build"
-    for (int i = 0; i < 8; ++i)
-    {
-        if (refFileBase.getFileName().equalsIgnoreCase("build"))
-            break;
-
-        refFileBase = refFileBase.getParentDirectory();
-    }
-
-    // Von der "build" Ebene aus laden
-    juce::File refFile = refFileBase
+    juce::File refFile = pluginFile
+        .getParentDirectory()
         .getChildFile("ReferenceCurves")
         .getChildFile(filename);
 
-    // Inhalt von JSON in String laden
+    if (!refFile.existsAsFile())
+    {
+        DBG("Referenzdatei nicht gefunden: " + refFile.getFullPathName());
+        return;
+    }
+
     juce::String fileContent = refFile.loadFileAsString();
 
     if (fileContent.isEmpty())
     {
-        DBG("Konnte Referenzkurve nicht laden: " + filename);
+        DBG("Datei ist leer oder konnte nicht gelesen werden: " + refFile.getFullPathName());
         return;
     }
 
-    // Analysiert Text aus fileContent und erstellt dynamisches var
     juce::var jsonData = juce::JSON::parse(fileContent);
 
-    // Bänder aus JSON erstellen
+    if (jsonData.isVoid())
+    {
+        DBG("JSON konnte nicht geparst werden: " + refFile.getFullPathName());
+        return;
+    }
+
     auto bands = jsonData["bands"];
 
     if (bands.isArray())
@@ -776,5 +774,5 @@ void AudioPluginAudioProcessor::loadReferenceCurve(const juce::String& filename)
         }
     }
 
-    DBG("Referenzkurve geladen: " + filename + " (" + juce::String(referenceBands.size()) + " Bänder)");
+    DBG("Referenzkurve geladen: " + refFile.getFullPathName());
 }
